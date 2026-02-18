@@ -1,4 +1,4 @@
-.PHONY: run install lint format
+.PHONY: run install lint format test
 
 run:
 	streamlit run app.py
@@ -11,3 +11,6 @@ lint:
 
 format:
 	ruff format .
+
+test:
+	pytest tests/
