@@ -23,6 +23,9 @@ FAISS_INDEX_PATH = "faiss_index"
 FAISS_METADATA_PATH = os.path.join(FAISS_INDEX_PATH, "metadata.json")
 AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
+CHUNK_STRATEGY_CHAR = "Character (fast)"
+CHUNK_STRATEGY_SEMANTIC = "Semantic (accurate)"
+CHUNK_STRATEGIES = [CHUNK_STRATEGY_CHAR, CHUNK_STRATEGY_SEMANTIC]
 
 
 def save_index_metadata(filenames, chunk_count):
@@ -104,18 +107,50 @@ def get_pdf_text(pdf_docs):
     return results
 
 
-def get_text_chunks(texts_with_meta, chunk_size=1000, chunk_overlap=200):
+def get_text_chunks(
+    texts_with_meta,
+    strategy=CHUNK_STRATEGY_CHAR,
+    chunk_size=1000,
+    chunk_overlap=200,
+    semantic_threshold=95,
+    api_key=None,
+):
     """Split each document's text into chunks; returns (chunks, metadatas).
 
     Args:
         texts_with_meta: list of (text, filename) tuples from get_pdf_text()
-        chunk_size: target character count per chunk
-        chunk_overlap: number of overlapping characters between adjacent chunks
+        strategy: CHUNK_STRATEGY_CHAR or CHUNK_STRATEGY_SEMANTIC
+        chunk_size: Character strategy — target character count per chunk
+        chunk_overlap: Character strategy — overlapping characters between chunks
+        semantic_threshold: Semantic strategy — percentile threshold (0–100)
+            for splitting; lower → more (smaller) chunks
+        api_key: OpenAI API key forwarded to SemanticChunker embeddings
 
     Returns:
         Tuple of (list[str], list[dict]) — the text chunks and their FAISS
         metadata (each dict carries a "source" key with the originating filename).
     """
+    if strategy == CHUNK_STRATEGY_SEMANTIC:
+        try:
+            from langchain_experimental.text_splitter import SemanticChunker
+        except ImportError:
+            raise ImportError(
+                "Semantic chunking requires 'langchain-experimental'. "
+                "Uncomment it in requirements.txt and run `make install`."
+            )
+        kwargs = {"api_key": api_key} if api_key else {}
+        splitter = SemanticChunker(
+            OpenAIEmbeddings(**kwargs),
+            breakpoint_threshold_type="percentile",
+            breakpoint_threshold_amount=semantic_threshold,
+        )
+        all_docs = splitter.create_documents(
+            [text for text, _ in texts_with_meta],
+            metadatas=[{"source": name} for _, name in texts_with_meta],
+        )
+        return [d.page_content for d in all_docs], [d.metadata for d in all_docs]
+
+    # Default: Character splitting
     text_splitter = CharacterTextSplitter(
         separator="\n",
         chunk_size=chunk_size,
@@ -297,6 +332,14 @@ def main():
         st.session_state.sources = []
     if "model" not in st.session_state:
         st.session_state.model = DEFAULT_MODEL
+    if "chunk_strategy" not in st.session_state:
+        st.session_state.chunk_strategy = CHUNK_STRATEGY_CHAR
+    if "chunk_size" not in st.session_state:
+        st.session_state.chunk_size = 1000
+    if "chunk_overlap" not in st.session_state:
+        st.session_state.chunk_overlap = 200
+    if "semantic_threshold" not in st.session_state:
+        st.session_state.semantic_threshold = 95
 
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
@@ -358,6 +401,53 @@ def main():
                 st.rerun()
 
         st.subheader("Your documents")
+        with st.expander("Chunking settings", expanded=False):
+            selected_strategy = st.radio(
+                "Strategy",
+                CHUNK_STRATEGIES,
+                index=CHUNK_STRATEGIES.index(st.session_state.chunk_strategy),
+                help=(
+                    "Character: fast rule-based splitting by character count.  \n"
+                    "Semantic: uses embeddings to find natural topic boundaries "
+                    "(makes API calls during processing)."
+                ),
+            )
+            st.session_state.chunk_strategy = selected_strategy
+
+            if selected_strategy == CHUNK_STRATEGY_CHAR:
+                st.session_state.chunk_size = st.slider(
+                    "Chunk size (characters)",
+                    min_value=100,
+                    max_value=3000,
+                    value=st.session_state.chunk_size,
+                    step=100,
+                    help="Maximum number of characters per chunk.",
+                )
+                st.session_state.chunk_overlap = st.slider(
+                    "Overlap (characters)",
+                    min_value=0,
+                    max_value=min(500, st.session_state.chunk_size - 1),
+                    value=min(st.session_state.chunk_overlap, st.session_state.chunk_size - 1),
+                    step=50,
+                    help="Characters shared between adjacent chunks to preserve context.",
+                )
+            else:
+                st.session_state.semantic_threshold = st.slider(
+                    "Breakpoint percentile",
+                    min_value=50,
+                    max_value=99,
+                    value=st.session_state.semantic_threshold,
+                    step=1,
+                    help=(
+                        "Cosine-distance percentile used to detect topic boundaries.  \n"
+                        "Lower → more (smaller) chunks. Higher → fewer (larger) chunks."
+                    ),
+                )
+                st.caption(
+                    ":warning: Semantic chunking calls the OpenAI Embeddings API "
+                    "for every document during processing."
+                )
+
         pdf_docs = st.file_uploader(
             "Upload your PDFs here and click on 'Process'",
             accept_multiple_files=True,
@@ -376,7 +466,14 @@ def main():
                                 "Ensure the files are not scanned images or password-protected."
                             )
                         else:
-                            text_chunks, metadatas = get_text_chunks(texts_with_meta)
+                            text_chunks, metadatas = get_text_chunks(
+                                texts_with_meta,
+                                strategy=st.session_state.chunk_strategy,
+                                chunk_size=st.session_state.chunk_size,
+                                chunk_overlap=st.session_state.chunk_overlap,
+                                semantic_threshold=st.session_state.semantic_threshold,
+                                api_key=get_api_key(),
+                            )
                             vectorstore = get_vectorstore(text_chunks, metadatas, api_key=get_api_key())
                             vectorstore.save_local(FAISS_INDEX_PATH)
                             save_index_metadata(

@@ -1,7 +1,6 @@
 """Tests for save_index_metadata() and load_index_metadata() in app.py."""
 
 import json
-import os
 
 import app
 
@@ -52,7 +51,7 @@ def test_timestamp_is_iso_format(tmp_path, monkeypatch):
     app.save_index_metadata(["x.pdf"], chunk_count=1)
     result = app.load_index_metadata()
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Should not raise — confirms it is a valid ISO 8601 timestamp
     ts = datetime.fromisoformat(result["timestamp"])
