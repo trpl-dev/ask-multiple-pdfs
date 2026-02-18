@@ -42,7 +42,7 @@ PDF Upload → Text Extraction → Chunking → Embedding → Vector Store → C
 | Text extraction | `get_pdf_text()` | `pypdf.PdfReader` iterates pages |
 | Chunking | `get_text_chunks()` | `CharacterTextSplitter` (size=1000, overlap=200, separator=`\n`) |
 | Embedding | `get_vectorstore()` | `OpenAIEmbeddings` (default) or `HuggingFaceInstructEmbeddings` |
-| Vector store | `get_vectorstore()` | `FAISS.from_texts()` — in-memory only, not persisted |
+| Vector store | `get_vectorstore()` | `FAISS.from_texts()` — saved to `faiss_index/` on disk; auto-loaded on startup |
 | Conversational chain | `get_conversation_chain()` | `ConversationalRetrievalChain` + `ConversationBufferMemory` |
 | UI rendering | `handle_userinput()`, `main()` | Streamlit + raw HTML via `unsafe_allow_html=True` |
 
@@ -56,7 +56,8 @@ The entire application. Five functions plus `main()`:
 
 - **`get_pdf_text(pdf_docs)`** — Takes a list of Streamlit file upload objects; returns concatenated text from all PDF pages. Per-file errors are caught and shown as `st.warning()` rather than crashing.
 - **`get_text_chunks(text)`** — Splits raw text into 1,000-character overlapping chunks.
-- **`get_vectorstore(text_chunks)`** — Creates OpenAI embeddings and builds a FAISS in-memory vector store.
+- **`get_vectorstore(text_chunks)`** — Creates OpenAI embeddings and builds a FAISS vector store.
+- **`load_vectorstore()`** — Loads a previously saved FAISS index from `faiss_index/` on disk. Returns `None` if the path doesn't exist or loading fails.
 - **`get_conversation_chain(vectorstore)`** — Builds a `ConversationalRetrievalChain` with `ConversationBufferMemory` (key: `chat_history`).
 - **`handle_userinput(user_question)`** — Guards against no processed documents; invokes the chain via `.invoke()`; stores response in `st.session_state.chat_history`; renders alternating user/bot messages. Errors shown via `st.error()`.
 - **`main()`** — Streamlit entry point: loads `.env`, configures page, initializes session state, renders sidebar file uploader (PDF-only) and chat input. "Process" button validates that files are selected before processing. Processing errors are caught and shown via `st.error()`.
@@ -233,7 +234,7 @@ make format   # auto-fix formatting
 
 ## Known Limitations and Gotchas
 
-1. **In-memory vector store** — FAISS is built fresh every time "Process" is clicked. Nothing is persisted to disk. Re-uploading the same PDFs rebuilds from scratch.
+1. **Persisted vector store** — After "Process" is clicked, the FAISS index is saved to `faiss_index/` (gitignored) and auto-loaded on the next server start. Clicking "Clear saved index" wipes it. The index is rebuilt from scratch each time "Process" is clicked.
 
 2. **No chunking of conversation history** — `ConversationBufferMemory` stores the full conversation. For very long sessions, token limits may eventually be exceeded.
 

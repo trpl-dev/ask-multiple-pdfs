@@ -1,16 +1,22 @@
+import os
+import shutil
+
 import streamlit as st
 from dotenv import load_dotenv
-from pypdf import PdfReader
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import FAISS
-from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
-from htmlTemplates import css, bot_template, user_template
+from langchain.memory import ConversationBufferMemory
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_text_splitters import CharacterTextSplitter
+from pypdf import PdfReader
+
+from htmlTemplates import bot_template, css, user_template
 
 # Uncomment for HuggingFace alternatives:
 # from langchain_community.llms import HuggingFaceHub
 # from langchain_community.embeddings import HuggingFaceInstructEmbeddings
+
+FAISS_INDEX_PATH = "faiss_index"
 
 
 def get_pdf_text(pdf_docs):
@@ -43,6 +49,18 @@ def get_vectorstore(text_chunks):
     # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
     vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
     return vectorstore
+
+
+def load_vectorstore():
+    """Load a previously saved FAISS index from disk. Returns None on failure."""
+    if not os.path.exists(FAISS_INDEX_PATH):
+        return None
+    try:
+        embeddings = OpenAIEmbeddings()
+        return FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+    except Exception as e:
+        st.warning(f"Could not load saved index: {e}")
+        return None
 
 
 def get_conversation_chain(vectorstore):
@@ -93,6 +111,13 @@ def main():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = None
 
+    # Auto-load a previously saved FAISS index so users don't have to re-upload
+    # PDFs after a page reload or server restart.
+    if st.session_state.conversation is None:
+        vectorstore = load_vectorstore()
+        if vectorstore is not None:
+            st.session_state.conversation = get_conversation_chain(vectorstore)
+
     st.header("Chat with multiple PDFs :books:")
     user_question = st.text_input("Ask a question about your documents:")
     if user_question:
@@ -121,12 +146,19 @@ def main():
                         else:
                             text_chunks = get_text_chunks(raw_text)
                             vectorstore = get_vectorstore(text_chunks)
-                            st.session_state.conversation = get_conversation_chain(
-                                vectorstore
-                            )
-                            st.success("Documents processed! Ask a question above.")
+                            vectorstore.save_local(FAISS_INDEX_PATH)
+                            st.session_state.conversation = get_conversation_chain(vectorstore)
+                            st.success("Documents processed and index saved!")
                     except Exception as e:
                         st.error(f"Error processing documents: {e}")
+
+        if os.path.exists(FAISS_INDEX_PATH):
+            st.divider()
+            if st.button("Clear saved index"):
+                shutil.rmtree(FAISS_INDEX_PATH)
+                st.session_state.conversation = None
+                st.session_state.chat_history = None
+                st.rerun()
 
 
 if __name__ == "__main__":
