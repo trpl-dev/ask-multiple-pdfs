@@ -285,6 +285,15 @@ def main():
             st.session_state.sources = []
 
         st.divider()
+        if st.session_state.chat_history:
+            if st.button("New conversation", use_container_width=True):
+                st.session_state.chat_history = []
+                st.session_state.sources = []
+                st.session_state.memory = ConversationBufferMemory(
+                    memory_key="chat_history", return_messages=True
+                )
+                st.rerun()
+
         st.subheader("Your documents")
         pdf_docs = st.file_uploader(
             "Upload your PDFs here and click on 'Process'",
