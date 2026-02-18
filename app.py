@@ -17,6 +17,8 @@ from htmlTemplates import bot_template, css, user_template
 # from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 
 FAISS_INDEX_PATH = "faiss_index"
+AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]
+DEFAULT_MODEL = AVAILABLE_MODELS[0]
 
 
 def get_pdf_text(pdf_docs):
@@ -63,8 +65,8 @@ def load_vectorstore():
         return None
 
 
-def get_conversation_chain(vectorstore):
-    llm = ChatOpenAI()
+def get_conversation_chain(vectorstore, model=DEFAULT_MODEL):
+    llm = ChatOpenAI(model=model)
     # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature": 0.5, "max_length": 512})
 
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
@@ -110,13 +112,15 @@ def main():
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = None
+    if "model" not in st.session_state:
+        st.session_state.model = DEFAULT_MODEL
 
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
     if st.session_state.conversation is None:
         vectorstore = load_vectorstore()
         if vectorstore is not None:
-            st.session_state.conversation = get_conversation_chain(vectorstore)
+            st.session_state.conversation = get_conversation_chain(vectorstore, st.session_state.model)
 
     st.header("Chat with multiple PDFs :books:")
     user_question = st.text_input("Ask a question about your documents:")
@@ -124,6 +128,17 @@ def main():
         handle_userinput(user_question)
 
     with st.sidebar:
+        selected_model = st.selectbox(
+            "OpenAI model",
+            AVAILABLE_MODELS,
+            index=AVAILABLE_MODELS.index(st.session_state.model),
+        )
+        if selected_model != st.session_state.model:
+            st.session_state.model = selected_model
+            st.session_state.conversation = None
+            st.session_state.chat_history = None
+
+        st.divider()
         st.subheader("Your documents")
         pdf_docs = st.file_uploader(
             "Upload your PDFs here and click on 'Process'",
@@ -147,7 +162,9 @@ def main():
                             text_chunks = get_text_chunks(raw_text)
                             vectorstore = get_vectorstore(text_chunks)
                             vectorstore.save_local(FAISS_INDEX_PATH)
-                            st.session_state.conversation = get_conversation_chain(vectorstore)
+                            st.session_state.conversation = get_conversation_chain(
+                                vectorstore, st.session_state.model
+                            )
                             st.success("Documents processed and index saved!")
                     except Exception as e:
                         st.error(f"Error processing documents: {e}")
