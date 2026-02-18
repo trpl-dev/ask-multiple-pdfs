@@ -22,6 +22,18 @@ AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 
 
+def get_api_key():
+    """Return the active OpenAI API key.
+
+    Priority: key entered in the sidebar UI > OPENAI_API_KEY env var.
+    Returns None if neither is set so callers can show a user-friendly warning.
+    """
+    ui_key = st.session_state.get("api_key_input", "").strip()
+    if ui_key:
+        return ui_key
+    return os.environ.get("OPENAI_API_KEY") or None
+
+
 # ---------------------------------------------------------------------------
 # Streaming callback — writes LLM tokens into a Streamlit placeholder
 # ---------------------------------------------------------------------------
@@ -94,8 +106,9 @@ def get_text_chunks(texts_with_meta, chunk_size=1000, chunk_overlap=200):
     return all_chunks, all_meta
 
 
-def get_vectorstore(text_chunks, metadatas=None):
-    embeddings = OpenAIEmbeddings()
+def get_vectorstore(text_chunks, metadatas=None, api_key=None):
+    kwargs = {"api_key": api_key} if api_key else {}
+    embeddings = OpenAIEmbeddings(**kwargs)
     # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
     vectorstore = FAISS.from_texts(
         texts=text_chunks, embedding=embeddings, metadatas=metadatas or []
@@ -103,28 +116,30 @@ def get_vectorstore(text_chunks, metadatas=None):
     return vectorstore
 
 
-def load_vectorstore():
+def load_vectorstore(api_key=None):
     """Load a previously saved FAISS index from disk. Returns None on failure."""
     if not os.path.exists(FAISS_INDEX_PATH):
         return None
     try:
-        embeddings = OpenAIEmbeddings()
+        kwargs = {"api_key": api_key} if api_key else {}
+        embeddings = OpenAIEmbeddings(**kwargs)
         return FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
         st.warning(f"Could not load saved index: {e}")
         return None
 
 
-def get_conversation_chain(vectorstore, memory, model=DEFAULT_MODEL, stream_handler=None):
+def get_conversation_chain(vectorstore, memory, model=DEFAULT_MODEL, stream_handler=None, api_key=None):
     """Build a ConversationalRetrievalChain.
 
     Uses a non-streaming LLM for question condensation and a streaming-enabled
     LLM (with the given StreamHandler) for the final answer generation so that
     only answer tokens appear in the UI placeholder.
     """
+    kwargs = {"api_key": api_key} if api_key else {}
     callbacks = [stream_handler] if stream_handler else []
-    answer_llm = ChatOpenAI(model=model, streaming=True, callbacks=callbacks)
-    condense_llm = ChatOpenAI(model=model)  # no streaming for question condensation
+    answer_llm = ChatOpenAI(model=model, streaming=True, callbacks=callbacks, **kwargs)
+    condense_llm = ChatOpenAI(model=model, **kwargs)  # no streaming for question condensation
     # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature": 0.5, "max_length": 512})
 
     conversation_chain = ConversationalRetrievalChain.from_llm(
@@ -192,6 +207,7 @@ def handle_userinput(user_question):
             st.session_state.memory,
             st.session_state.model,
             stream_handler,
+            api_key=get_api_key(),
         )
         response = chain.invoke({"question": user_question})
         new_sources = response.get("source_documents", [])
@@ -233,7 +249,7 @@ def main():
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
     if st.session_state.vectorstore is None and os.path.exists(FAISS_INDEX_PATH):
-        vs = load_vectorstore()
+        vs = load_vectorstore(api_key=get_api_key())
         if vs is not None:
             st.session_state.vectorstore = vs
             st.session_state.memory = ConversationBufferMemory(
@@ -247,6 +263,16 @@ def main():
 
     # --- Sidebar ---
     with st.sidebar:
+        st.text_input(
+            "OpenAI API Key",
+            type="password",
+            placeholder="sk-… (leave blank to use .env)",
+            key="api_key_input",
+        )
+        if not get_api_key():
+            st.warning("No API key found. Enter one above or set OPENAI_API_KEY in your .env file.")
+
+        st.divider()
         selected_model = st.selectbox(
             "OpenAI model",
             AVAILABLE_MODELS,
@@ -279,7 +305,7 @@ def main():
                             )
                         else:
                             text_chunks, metadatas = get_text_chunks(texts_with_meta)
-                            vectorstore = get_vectorstore(text_chunks, metadatas)
+                            vectorstore = get_vectorstore(text_chunks, metadatas, api_key=get_api_key())
                             vectorstore.save_local(FAISS_INDEX_PATH)
                             st.session_state.vectorstore = vectorstore
                             st.session_state.memory = ConversationBufferMemory(
