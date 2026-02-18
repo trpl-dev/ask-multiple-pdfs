@@ -1,5 +1,7 @@
+import json
 import os
 import shutil
+from datetime import datetime, timezone
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -18,8 +20,31 @@ from htmlTemplates import bot_template, css, user_template
 # from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 
 FAISS_INDEX_PATH = "faiss_index"
+FAISS_METADATA_PATH = os.path.join(FAISS_INDEX_PATH, "metadata.json")
 AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
+
+
+def save_index_metadata(filenames, chunk_count):
+    """Persist index provenance to metadata.json inside the FAISS directory."""
+    meta = {
+        "files": filenames,
+        "chunks": chunk_count,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(FAISS_METADATA_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+
+
+def load_index_metadata():
+    """Return the saved index metadata dict, or None if unavailable."""
+    if not os.path.exists(FAISS_METADATA_PATH):
+        return None
+    try:
+        with open(FAISS_METADATA_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def get_api_key():
@@ -316,6 +341,10 @@ def main():
                             text_chunks, metadatas = get_text_chunks(texts_with_meta)
                             vectorstore = get_vectorstore(text_chunks, metadatas, api_key=get_api_key())
                             vectorstore.save_local(FAISS_INDEX_PATH)
+                            save_index_metadata(
+                                filenames=[t[1] for t in texts_with_meta],
+                                chunk_count=len(text_chunks),
+                            )
                             st.session_state.vectorstore = vectorstore
                             st.session_state.memory = ConversationBufferMemory(
                                 memory_key="chat_history", return_messages=True
@@ -328,6 +357,15 @@ def main():
 
         if os.path.exists(FAISS_INDEX_PATH):
             st.divider()
+            meta = load_index_metadata()
+            if meta:
+                ts = datetime.fromisoformat(meta["timestamp"])
+                age_min = int((datetime.now(timezone.utc) - ts).total_seconds() / 60)
+                age_str = f"{age_min} min ago" if age_min < 60 else f"{age_min // 60} h ago"
+                st.caption(
+                    f"**Index loaded** · {meta['chunks']} chunks · {age_str}  \n"
+                    + ", ".join(meta["files"])
+                )
             if st.button("Clear saved index"):
                 shutil.rmtree(FAISS_INDEX_PATH)
                 st.session_state.vectorstore = None
