@@ -198,6 +198,33 @@ def _render_sources(sources):
             st.markdown(f"**{filename}**  \n{preview}…")
 
 
+def format_conversation_as_markdown(chat_history, sources):
+    """Serialize the conversation to a Markdown string for download."""
+    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [f"# Chat Export — {date_str}", ""]
+    bot_turn_idx = 0
+    for i, message in enumerate(chat_history):
+        if i % 2 == 0:
+            lines.append(f"**You:** {message.content}")
+            lines.append("")
+        else:
+            lines.append(f"**Bot:** {message.content}")
+            lines.append("")
+            srcs = sources[bot_turn_idx] if bot_turn_idx < len(sources) else []
+            if srcs:
+                seen = set()
+                src_parts = []
+                for doc in srcs:
+                    name = doc.metadata.get("source", "unknown")
+                    if name not in seen:
+                        seen.add(name)
+                        src_parts.append(name)
+                lines.append(f"> *Sources: {', '.join(src_parts)}*")
+                lines.append("")
+            bot_turn_idx += 1
+    return "\n".join(lines)
+
+
 def handle_userinput(user_question):
     if st.session_state.vectorstore is None:
         st.warning("Please upload and process your PDF documents first.")
@@ -311,6 +338,17 @@ def main():
 
         st.divider()
         if st.session_state.chat_history:
+            md_export = format_conversation_as_markdown(
+                st.session_state.chat_history, st.session_state.sources
+            )
+            filename = f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            st.download_button(
+                "Export conversation (.md)",
+                data=md_export,
+                file_name=filename,
+                mime="text/markdown",
+                use_container_width=True,
+            )
             if st.button("New conversation", use_container_width=True):
                 st.session_state.chat_history = []
                 st.session_state.sources = []
