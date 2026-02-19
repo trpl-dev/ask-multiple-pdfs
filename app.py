@@ -26,6 +26,9 @@ DEFAULT_MODEL = AVAILABLE_MODELS[0]
 CHUNK_STRATEGY_CHAR = "Character (fast)"
 CHUNK_STRATEGY_SEMANTIC = "Semantic (accurate)"
 CHUNK_STRATEGIES = [CHUNK_STRATEGY_CHAR, CHUNK_STRATEGY_SEMANTIC]
+RETRIEVAL_MODES = ["Similarity", "MMR"]
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_RETRIEVAL_K = 4
 
 
 def save_index_metadata(filenames, chunk_count):
@@ -189,7 +192,16 @@ def load_vectorstore(api_key=None):
         return None
 
 
-def get_conversation_chain(vectorstore, memory, model=DEFAULT_MODEL, stream_handler=None, api_key=None):
+def get_conversation_chain(
+    vectorstore,
+    memory,
+    model=DEFAULT_MODEL,
+    stream_handler=None,
+    api_key=None,
+    temperature=DEFAULT_TEMPERATURE,
+    retrieval_k=DEFAULT_RETRIEVAL_K,
+    retrieval_mode="Similarity",
+):
     """Build a ConversationalRetrievalChain.
 
     Uses a non-streaming LLM for question condensation and a streaming-enabled
@@ -198,14 +210,24 @@ def get_conversation_chain(vectorstore, memory, model=DEFAULT_MODEL, stream_hand
     """
     kwargs = {"api_key": api_key} if api_key else {}
     callbacks = [stream_handler] if stream_handler else []
-    answer_llm = ChatOpenAI(model=model, streaming=True, callbacks=callbacks, **kwargs)
-    condense_llm = ChatOpenAI(model=model, **kwargs)  # no streaming for question condensation
+    answer_llm = ChatOpenAI(
+        model=model, temperature=temperature, streaming=True, callbacks=callbacks, **kwargs
+    )
+    condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
     # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature": 0.5, "max_length": 512})
+
+    if retrieval_mode == "MMR":
+        retriever = vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": retrieval_k, "fetch_k": max(retrieval_k * 3, 20)},
+        )
+    else:
+        retriever = vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
 
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=answer_llm,
         condense_question_llm=condense_llm,
-        retriever=vectorstore.as_retriever(),
+        retriever=retriever,
         memory=memory,
         return_source_documents=True,
     )
@@ -295,6 +317,9 @@ def handle_userinput(user_question):
             st.session_state.model,
             stream_handler,
             api_key=get_api_key(),
+            temperature=st.session_state.temperature,
+            retrieval_k=st.session_state.retrieval_k,
+            retrieval_mode=st.session_state.retrieval_mode,
         )
         response = chain.invoke({"question": user_question})
         new_sources = response.get("source_documents", [])
@@ -340,6 +365,12 @@ def main():
         st.session_state.chunk_overlap = 200
     if "semantic_threshold" not in st.session_state:
         st.session_state.semantic_threshold = 95
+    if "temperature" not in st.session_state:
+        st.session_state.temperature = DEFAULT_TEMPERATURE
+    if "retrieval_k" not in st.session_state:
+        st.session_state.retrieval_k = DEFAULT_RETRIEVAL_K
+    if "retrieval_mode" not in st.session_state:
+        st.session_state.retrieval_mode = RETRIEVAL_MODES[0]
 
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
@@ -378,6 +409,34 @@ def main():
             st.session_state.memory = None
             st.session_state.chat_history = []
             st.session_state.sources = []
+
+        with st.expander("LLM & Retrieval", expanded=False):
+            st.session_state.temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=st.session_state.temperature,
+                step=0.05,
+                help="Higher = more creative answers; lower = more deterministic.",
+            )
+            st.session_state.retrieval_k = st.slider(
+                "Retrieved chunks (k)",
+                min_value=1,
+                max_value=10,
+                value=st.session_state.retrieval_k,
+                step=1,
+                help="Number of document chunks passed to the LLM per question.",
+            )
+            st.session_state.retrieval_mode = st.radio(
+                "Retrieval mode",
+                RETRIEVAL_MODES,
+                index=RETRIEVAL_MODES.index(st.session_state.retrieval_mode),
+                horizontal=True,
+                help=(
+                    "Similarity: closest chunks by cosine distance.  \n"
+                    "MMR: balances relevance with diversity to avoid repetitive chunks."
+                ),
+            )
 
         st.divider()
         if st.session_state.chat_history:
