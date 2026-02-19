@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 from datetime import datetime, timezone
+from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -9,7 +10,7 @@ from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
-from langchain.schema import AIMessage, Document, HumanMessage
+from langchain.schema import AIMessage, BaseMessage, Document, HumanMessage
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
@@ -32,7 +33,7 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_RETRIEVAL_K = 4
 
 
-def save_index_metadata(filenames, chunk_count):
+def save_index_metadata(filenames: list[str], chunk_count: int) -> None:
     """Persist index provenance to metadata.json inside the FAISS directory."""
     meta = {
         "files": filenames,
@@ -43,7 +44,7 @@ def save_index_metadata(filenames, chunk_count):
         json.dump(meta, f)
 
 
-def load_index_metadata():
+def load_index_metadata() -> dict | None:
     """Return the saved index metadata dict, or None if unavailable."""
     if not os.path.exists(FAISS_METADATA_PATH):
         return None
@@ -59,14 +60,14 @@ def load_index_metadata():
 # ---------------------------------------------------------------------------
 
 
-def _serialize_messages(chat_history):
+def _serialize_messages(chat_history: list[BaseMessage]) -> list[dict]:
     return [
         {"type": "human" if isinstance(msg, HumanMessage) else "ai", "content": msg.content}
         for msg in chat_history
     ]
 
 
-def _deserialize_messages(data):
+def _deserialize_messages(data: list[dict]) -> list[BaseMessage]:
     result = []
     for d in data:
         if d.get("type") == "human":
@@ -76,28 +77,28 @@ def _deserialize_messages(data):
     return result
 
 
-def _serialize_sources(sources):
+def _serialize_sources(sources: list[list[Document]]) -> list[list[dict]]:
     return [
         [{"page_content": doc.page_content, "metadata": doc.metadata} for doc in turn_sources]
         for turn_sources in sources
     ]
 
 
-def _deserialize_sources(raw):
+def _deserialize_sources(raw: list[list[dict]]) -> list[list[Document]]:
     return [
         [Document(page_content=s["page_content"], metadata=s.get("metadata", {})) for s in turn]
         for turn in raw
     ]
 
 
-def list_sessions():
+def list_sessions() -> list[str]:
     """Return sorted list of saved session names (without .json extension)."""
     if not os.path.exists(SESSIONS_DIR):
         return []
     return sorted(f[:-5] for f in os.listdir(SESSIONS_DIR) if f.endswith(".json"))
 
 
-def save_session(name, chat_history, sources):
+def save_session(name: str, chat_history: list[BaseMessage], sources: list[list[Document]]) -> None:
     """Persist the current conversation to sessions/<name>.json."""
     os.makedirs(SESSIONS_DIR, exist_ok=True)
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
@@ -111,7 +112,9 @@ def save_session(name, chat_history, sources):
         json.dump(data, f, indent=2)
 
 
-def load_session(name):
+def load_session(
+    name: str,
+) -> tuple[list[BaseMessage], list[list[Document]]] | tuple[None, None]:
     """Load a saved session; returns (chat_history, sources) or (None, None)."""
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
     if not os.path.exists(path):
@@ -126,14 +129,14 @@ def load_session(name):
         return None, None
 
 
-def delete_session(name):
+def delete_session(name: str) -> None:
     """Delete a saved session file."""
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
     if os.path.exists(path):
         os.remove(path)
 
 
-def get_api_key():
+def get_api_key() -> str | None:
     """Return the active OpenAI API key.
 
     Priority: key entered in the sidebar UI > OPENAI_API_KEY env var.
@@ -153,16 +156,16 @@ def get_api_key():
 class StreamHandler(BaseCallbackHandler):
     """Streams LLM tokens into a st.empty() placeholder as they arrive."""
 
-    def __init__(self, container):
+    def __init__(self, container: Any) -> None:
         self.container = container
         self.text = ""
 
-    def on_llm_new_token(self, token: str, **kwargs):
+    def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
         self.text += token
         # Show a blinking-cursor effect while streaming
         self.container.markdown(self.text + "▌")
 
-    def on_llm_end(self, *args, **kwargs):
+    def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
         # Remove cursor when the LLM finishes
         self.container.markdown(self.text)
 
@@ -172,7 +175,7 @@ class StreamHandler(BaseCallbackHandler):
 # ---------------------------------------------------------------------------
 
 
-def get_pdf_text(pdf_docs):
+def get_pdf_text(pdf_docs: list[Any]) -> list[tuple[str, str]]:
     """Extract text from each PDF; returns list of (text, filename) tuples."""
     results = []
     for pdf in pdf_docs:
@@ -191,13 +194,13 @@ def get_pdf_text(pdf_docs):
 
 
 def get_text_chunks(
-    texts_with_meta,
-    strategy=CHUNK_STRATEGY_CHAR,
-    chunk_size=1000,
-    chunk_overlap=200,
-    semantic_threshold=95,
-    api_key=None,
-):
+    texts_with_meta: list[tuple[str, str]],
+    strategy: str = CHUNK_STRATEGY_CHAR,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
+    semantic_threshold: int = 95,
+    api_key: str | None = None,
+) -> tuple[list[str], list[dict]]:
     """Split each document's text into chunks; returns (chunks, metadatas).
 
     Args:
@@ -249,7 +252,9 @@ def get_text_chunks(
     return all_chunks, all_meta
 
 
-def get_vectorstore(text_chunks, metadatas=None, api_key=None):
+def get_vectorstore(
+    text_chunks: list[str], metadatas: list[dict] | None = None, api_key: str | None = None
+) -> FAISS:
     kwargs = {"api_key": api_key} if api_key else {}
     embeddings = OpenAIEmbeddings(**kwargs)
     # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
@@ -259,7 +264,7 @@ def get_vectorstore(text_chunks, metadatas=None, api_key=None):
     return vectorstore
 
 
-def load_vectorstore(api_key=None):
+def load_vectorstore(api_key: str | None = None) -> FAISS | None:
     """Load a previously saved FAISS index from disk. Returns None on failure."""
     if not os.path.exists(FAISS_INDEX_PATH):
         return None
@@ -273,16 +278,16 @@ def load_vectorstore(api_key=None):
 
 
 def get_conversation_chain(
-    vectorstore,
-    memory,
-    model=DEFAULT_MODEL,
-    stream_handler=None,
-    api_key=None,
-    temperature=DEFAULT_TEMPERATURE,
-    retrieval_k=DEFAULT_RETRIEVAL_K,
-    retrieval_mode="Similarity",
-    system_prompt="",
-):
+    vectorstore: FAISS,
+    memory: ConversationBufferMemory,
+    model: str = DEFAULT_MODEL,
+    stream_handler: StreamHandler | None = None,
+    api_key: str | None = None,
+    temperature: float = DEFAULT_TEMPERATURE,
+    retrieval_k: int = DEFAULT_RETRIEVAL_K,
+    retrieval_mode: str = "Similarity",
+    system_prompt: str = "",
+) -> ConversationalRetrievalChain:
     """Build a ConversationalRetrievalChain.
 
     Uses a non-streaming LLM for question condensation and a streaming-enabled
@@ -330,7 +335,9 @@ def get_conversation_chain(
 # ---------------------------------------------------------------------------
 
 
-def generate_suggested_questions(text_chunks, api_key=None, model=DEFAULT_MODEL):
+def generate_suggested_questions(
+    text_chunks: list[str], api_key: str | None = None, model: str = DEFAULT_MODEL
+) -> list[str]:
     """Ask the LLM to propose 3-5 questions that users could ask about the documents.
 
     Takes a sample of the first ~3000 characters from the combined chunks and
@@ -360,7 +367,7 @@ def generate_suggested_questions(text_chunks, api_key=None, model=DEFAULT_MODEL)
 # ---------------------------------------------------------------------------
 
 
-def _render_sources(sources):
+def _render_sources(sources: list[Document]) -> None:
     """Render source documents inside an expander below a bot message."""
     if not sources:
         return
@@ -376,7 +383,9 @@ def _render_sources(sources):
             st.markdown(f"**{filename}**  \n{preview}…")
 
 
-def format_conversation_as_markdown(chat_history, sources):
+def format_conversation_as_markdown(
+    chat_history: list[BaseMessage], sources: list[list[Document]]
+) -> str:
     """Serialize the conversation to a Markdown string for download."""
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [f"# Chat Export — {date_str}", ""]
@@ -403,7 +412,7 @@ def format_conversation_as_markdown(chat_history, sources):
     return "\n".join(lines)
 
 
-def render_chat_history():
+def render_chat_history() -> None:
     """Render all previous turns from session state using st.chat_message()."""
     history = st.session_state.chat_history or []
     bot_turn_idx = 0
@@ -421,7 +430,7 @@ def render_chat_history():
                 bot_turn_idx += 1
 
 
-def handle_userinput(user_question):
+def handle_userinput(user_question: str) -> None:
     if st.session_state.vectorstore is None:
         st.warning("Please upload and process your PDF documents first.")
         return
@@ -467,7 +476,7 @@ def handle_userinput(user_question):
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="Chat with multiple PDFs", page_icon=":books:")
 
