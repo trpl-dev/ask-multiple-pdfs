@@ -13,8 +13,6 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
 from pypdf import PdfReader
 
-from htmlTemplates import bot_template, css, user_template
-
 # Uncomment for HuggingFace alternatives:
 # from langchain_community.llms import HuggingFaceHub
 # from langchain_community.embeddings import HuggingFaceInstructEmbeddings
@@ -282,58 +280,62 @@ def format_conversation_as_markdown(chat_history, sources):
     return "\n".join(lines)
 
 
+def render_chat_history():
+    """Render all previous turns from session state using st.chat_message()."""
+    history = st.session_state.chat_history or []
+    bot_turn_idx = 0
+    for i, message in enumerate(history):
+        role = "user" if i % 2 == 0 else "assistant"
+        with st.chat_message(role):
+            st.write(message.content)
+            if role == "assistant":
+                srcs = (
+                    st.session_state.sources[bot_turn_idx]
+                    if bot_turn_idx < len(st.session_state.sources)
+                    else []
+                )
+                _render_sources(srcs)
+                bot_turn_idx += 1
+
+
 def handle_userinput(user_question):
     if st.session_state.vectorstore is None:
         st.warning("Please upload and process your PDF documents first.")
         return
 
-    # --- Render all previous turns from history ---
-    history = st.session_state.chat_history or []
-    bot_turn_idx = 0
-    for i, message in enumerate(history):
-        if i % 2 == 0:
-            st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
-        else:
-            st.write(bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
-            srcs = (
-                st.session_state.sources[bot_turn_idx]
-                if bot_turn_idx < len(st.session_state.sources)
-                else []
+    # Show the new user message
+    with st.chat_message("user"):
+        st.write(user_question)
+
+    # Stream the bot response into a placeholder inside the chat bubble
+    with st.chat_message("assistant"):
+        stream_container = st.empty()
+        stream_handler = StreamHandler(stream_container)
+
+        try:
+            chain = get_conversation_chain(
+                st.session_state.vectorstore,
+                st.session_state.memory,
+                st.session_state.model,
+                stream_handler,
+                api_key=get_api_key(),
+                temperature=st.session_state.temperature,
+                retrieval_k=st.session_state.retrieval_k,
+                retrieval_mode=st.session_state.retrieval_mode,
             )
-            _render_sources(srcs)
-            bot_turn_idx += 1
+            response = chain.invoke({"question": user_question})
+            new_sources = response.get("source_documents", [])
+            st.session_state.chat_history = response["chat_history"]
+            st.session_state.sources.append(new_sources)
+        except Exception as e:
+            stream_container.empty()
+            st.error(f"Error getting response: {e}")
+            return
 
-    # --- Show the new user message immediately ---
-    st.write(user_template.replace("{{MSG}}", user_question), unsafe_allow_html=True)
-
-    # --- Stream the bot response into a placeholder ---
-    stream_container = st.empty()
-    stream_handler = StreamHandler(stream_container)
-
-    try:
-        chain = get_conversation_chain(
-            st.session_state.vectorstore,
-            st.session_state.memory,
-            st.session_state.model,
-            stream_handler,
-            api_key=get_api_key(),
-            temperature=st.session_state.temperature,
-            retrieval_k=st.session_state.retrieval_k,
-            retrieval_mode=st.session_state.retrieval_mode,
-        )
-        response = chain.invoke({"question": user_question})
-        new_sources = response.get("source_documents", [])
-        st.session_state.chat_history = response["chat_history"]
-        st.session_state.sources.append(new_sources)
-    except Exception as e:
-        stream_container.empty()
-        st.error(f"Error getting response: {e}")
-        return
-
-    # Replace streaming text with the final formatted bot bubble
-    bot_answer = st.session_state.chat_history[-1].content
-    stream_container.write(bot_template.replace("{{MSG}}", bot_answer), unsafe_allow_html=True)
-    _render_sources(new_sources)
+        # Replace streaming placeholder with final answer
+        bot_answer = st.session_state.chat_history[-1].content
+        stream_container.markdown(bot_answer)
+        _render_sources(new_sources)
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +346,6 @@ def handle_userinput(user_question):
 def main():
     load_dotenv()
     st.set_page_config(page_title="Chat with multiple PDFs", page_icon=":books:")
-    st.write(css, unsafe_allow_html=True)
 
     # --- Session state initialisation ---
     if "vectorstore" not in st.session_state:
@@ -383,8 +384,8 @@ def main():
             )
 
     st.header("Chat with multiple PDFs :books:")
-    user_question = st.text_input("Ask a question about your documents:")
-    if user_question:
+    render_chat_history()
+    if user_question := st.chat_input("Ask a question about your documents:"):
         handle_userinput(user_question)
 
     # --- Sidebar ---
