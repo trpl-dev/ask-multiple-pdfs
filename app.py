@@ -22,8 +22,8 @@ from pypdf import PdfReader
 # from langchain_community.llms import HuggingFaceHub
 # from langchain_community.embeddings import HuggingFaceInstructEmbeddings
 
-FAISS_INDEX_PATH = "faiss_index"
-FAISS_METADATA_PATH = os.path.join(FAISS_INDEX_PATH, "metadata.json")
+FAISS_INDEXES_DIR = "faiss_indexes"
+DEFAULT_SLOT = "default"
 SESSIONS_DIR = "sessions"
 AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
@@ -35,23 +35,39 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_RETRIEVAL_K = 4
 
 
-def save_index_metadata(filenames: list[str], chunk_count: int) -> None:
-    """Persist index provenance to metadata.json inside the FAISS directory."""
+def slot_path(slot: str) -> str:
+    """Return the filesystem path for the given index slot directory."""
+    return os.path.join(FAISS_INDEXES_DIR, slot)
+
+
+def list_index_slots() -> list[str]:
+    """Return sorted list of existing index slot names."""
+    if not os.path.exists(FAISS_INDEXES_DIR):
+        return []
+    return sorted(
+        d for d in os.listdir(FAISS_INDEXES_DIR) if os.path.isdir(slot_path(d))
+    )
+
+
+def save_index_metadata(filenames: list[str], chunk_count: int, index_path: str) -> None:
+    """Persist index provenance to metadata.json inside the given index directory."""
     meta = {
         "files": filenames,
         "chunks": chunk_count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    with open(FAISS_METADATA_PATH, "w", encoding="utf-8") as f:
+    meta_path = os.path.join(index_path, "metadata.json")
+    with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f)
 
 
-def load_index_metadata() -> dict | None:
-    """Return the saved index metadata dict, or None if unavailable."""
-    if not os.path.exists(FAISS_METADATA_PATH):
+def load_index_metadata(index_path: str) -> dict | None:
+    """Return the saved index metadata dict for the given path, or None."""
+    meta_path = os.path.join(index_path, "metadata.json")
+    if not os.path.exists(meta_path):
         return None
     try:
-        with open(FAISS_METADATA_PATH, encoding="utf-8") as f:
+        with open(meta_path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -266,14 +282,14 @@ def get_vectorstore(
     return vectorstore
 
 
-def load_vectorstore(api_key: str | None = None) -> FAISS | None:
+def load_vectorstore(index_path: str, api_key: str | None = None) -> FAISS | None:
     """Load a previously saved FAISS index from disk. Returns None on failure."""
-    if not os.path.exists(FAISS_INDEX_PATH):
+    if not os.path.exists(index_path):
         return None
     try:
         kwargs = {"api_key": api_key} if api_key else {}
         embeddings = OpenAIEmbeddings(**kwargs)
-        return FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+        return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
         st.warning(f"Could not load saved index: {e}")
         return None
@@ -565,11 +581,13 @@ def main() -> None:
         st.session_state.suggested_questions = []
     if "reranker_enabled" not in st.session_state:
         st.session_state.reranker_enabled = False
+    if "active_slot" not in st.session_state:
+        st.session_state.active_slot = DEFAULT_SLOT
 
-    # Auto-load a previously saved FAISS index so users don't have to re-upload
-    # PDFs after a page reload or server restart.
-    if st.session_state.vectorstore is None and os.path.exists(FAISS_INDEX_PATH):
-        vs = load_vectorstore(api_key=get_api_key())
+    # Auto-load the active slot's FAISS index on startup / slot switch.
+    active_path = slot_path(st.session_state.active_slot)
+    if st.session_state.vectorstore is None and os.path.exists(active_path):
+        vs = load_vectorstore(active_path, api_key=get_api_key())
         if vs is not None:
             st.session_state.vectorstore = vs
             st.session_state.memory = ConversationBufferMemory(
@@ -730,6 +748,56 @@ def main() -> None:
             else:
                 st.caption("No saved sessions yet.")
 
+        st.divider()
+        with st.expander("Index slots", expanded=False):
+            existing_slots = list_index_slots() or [DEFAULT_SLOT]
+            chosen_slot = st.selectbox(
+                "Active slot",
+                existing_slots,
+                index=existing_slots.index(st.session_state.active_slot)
+                if st.session_state.active_slot in existing_slots
+                else 0,
+                help="Each slot stores an independent FAISS index.",
+            )
+            if chosen_slot != st.session_state.active_slot:
+                st.session_state.active_slot = chosen_slot
+                st.session_state.vectorstore = None
+                st.session_state.memory = None
+                st.session_state.chat_history = []
+                st.session_state.sources = []
+                st.session_state.suggested_questions = []
+                st.rerun()
+
+            new_slot_name = st.text_input(
+                "New slot name", placeholder="e.g. project-alpha", key="new_slot_input"
+            )
+            cre_col, del_col = st.columns(2)
+            if cre_col.button("Create", use_container_width=True, disabled=not new_slot_name):
+                name = new_slot_name.strip()
+                if name:
+                    os.makedirs(slot_path(name), exist_ok=True)
+                    st.session_state.active_slot = name
+                    st.session_state.vectorstore = None
+                    st.session_state.memory = None
+                    st.session_state.chat_history = []
+                    st.session_state.sources = []
+                    st.session_state.suggested_questions = []
+                    st.rerun()
+            if del_col.button(
+                "Delete slot",
+                use_container_width=True,
+                disabled=chosen_slot == DEFAULT_SLOT,
+                help="Cannot delete the default slot.",
+            ):
+                shutil.rmtree(slot_path(chosen_slot), ignore_errors=True)
+                st.session_state.active_slot = DEFAULT_SLOT
+                st.session_state.vectorstore = None
+                st.session_state.memory = None
+                st.session_state.chat_history = []
+                st.session_state.sources = []
+                st.session_state.suggested_questions = []
+                st.rerun()
+
         st.subheader("Your documents")
         with st.expander("Chunking settings", expanded=False):
             selected_strategy = st.radio(
@@ -825,10 +893,12 @@ def main() -> None:
                             # Step 4 — persist
                             st.write("Saving index to disk…")
                             prog.progress(0.9)
-                            vectorstore.save_local(FAISS_INDEX_PATH)
+                            os.makedirs(active_path, exist_ok=True)
+                            vectorstore.save_local(active_path)
                             save_index_metadata(
                                 filenames=[t[1] for t in texts_with_meta],
                                 chunk_count=len(text_chunks),
+                                index_path=active_path,
                             )
                             prog.progress(1.0)
 
@@ -853,9 +923,9 @@ def main() -> None:
                 except Exception as e:
                     st.error(f"Error processing documents: {e}")
 
-        if os.path.exists(FAISS_INDEX_PATH):
+        if os.path.exists(active_path):
             st.divider()
-            meta = load_index_metadata()
+            meta = load_index_metadata(active_path)
             if meta:
                 ts = datetime.fromisoformat(meta["timestamp"])
                 age_min = int((datetime.now(timezone.utc) - ts).total_seconds() / 60)
@@ -865,7 +935,7 @@ def main() -> None:
                     + ", ".join(meta["files"])
                 )
             if st.button("Clear saved index"):
-                shutil.rmtree(FAISS_INDEX_PATH)
+                shutil.rmtree(active_path)
                 st.session_state.vectorstore = None
                 st.session_state.memory = None
                 st.session_state.chat_history = []
