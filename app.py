@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
@@ -199,6 +200,7 @@ def get_conversation_chain(
     temperature=DEFAULT_TEMPERATURE,
     retrieval_k=DEFAULT_RETRIEVAL_K,
     retrieval_mode="Similarity",
+    system_prompt="",
 ):
     """Build a ConversationalRetrievalChain.
 
@@ -222,12 +224,22 @@ def get_conversation_chain(
     else:
         retriever = vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
 
+    prefix = f"{system_prompt.strip()}\n\n" if system_prompt.strip() else ""
+    qa_template = (
+        f"{prefix}"
+        "Use the following context to answer the question.\n\n"
+        "Context:\n{context}\n\n"
+        "Question: {question}\nHelpful Answer:"
+    )
+    qa_prompt = PromptTemplate(input_variables=["context", "question"], template=qa_template)
+
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=answer_llm,
         condense_question_llm=condense_llm,
         retriever=retriever,
         memory=memory,
         return_source_documents=True,
+        combine_docs_chain_kwargs={"prompt": qa_prompt},
     )
     return conversation_chain
 
@@ -322,6 +334,7 @@ def handle_userinput(user_question):
                 temperature=st.session_state.temperature,
                 retrieval_k=st.session_state.retrieval_k,
                 retrieval_mode=st.session_state.retrieval_mode,
+                system_prompt=st.session_state.system_prompt,
             )
             response = chain.invoke({"question": user_question})
             new_sources = response.get("source_documents", [])
@@ -372,6 +385,8 @@ def main():
         st.session_state.retrieval_k = DEFAULT_RETRIEVAL_K
     if "retrieval_mode" not in st.session_state:
         st.session_state.retrieval_mode = RETRIEVAL_MODES[0]
+    if "system_prompt" not in st.session_state:
+        st.session_state.system_prompt = ""
 
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
@@ -412,6 +427,16 @@ def main():
             st.session_state.sources = []
 
         with st.expander("LLM & Retrieval", expanded=False):
+            st.session_state.system_prompt = st.text_area(
+                "System prompt",
+                value=st.session_state.system_prompt,
+                placeholder="e.g. Answer only in German. Be concise.",
+                help=(
+                    "Optional instructions prepended to every QA prompt. "
+                    "Use to set language, tone, or domain constraints."
+                ),
+                height=80,
+            )
             st.session_state.temperature = st.slider(
                 "Temperature",
                 min_value=0.0,
