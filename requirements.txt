@@ -7,9 +7,15 @@ python-dotenv>=1.0.0
 streamlit>=1.35.0
 faiss-cpu>=1.8.0
 
+# dev / testing
+pytest>=8.0.0
+
 # uncomment to use huggingface llms
 # huggingface-hub>=0.20.0
 
 # uncomment to use instructor embeddings
 # InstructorEmbedding>=1.0.1
 # sentence-transformers>=2.2.2
+
+# uncomment to enable Semantic chunking strategy in the UI
+# langchain-experimental>=0.0.60
