@@ -1,4 +1,4 @@
-.PHONY: run install lint format test
+.PHONY: run install lint format test docker-build docker-up docker-down
 
 run:
 	streamlit run app.py
@@ -14,3 +14,12 @@ format:
 
 test:
 	pytest tests/
+
+docker-build:
+	docker build -t ask-multiple-pdfs .
+
+docker-up:
+	docker compose up --build -d
+
+docker-down:
+	docker compose down
