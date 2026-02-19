@@ -542,15 +542,27 @@ def main():
             if not pdf_docs:
                 st.error("Please upload at least one PDF file before processing.")
             else:
-                with st.spinner("Processing"):
-                    try:
-                        texts_with_meta = get_pdf_text(pdf_docs)
+                try:
+                    with st.status("Processing documents…", expanded=True) as proc_status:
+                        # Step 1 — text extraction (per-file)
+                        st.write(f"Extracting text from {len(pdf_docs)} PDF(s)…")
+                        prog = st.progress(0.0)
+                        texts_with_meta = []
+                        for idx, pdf in enumerate(pdf_docs):
+                            partial = get_pdf_text([pdf])
+                            texts_with_meta.extend(partial)
+                            prog.progress((idx + 1) / len(pdf_docs) * 0.35)
+
                         if not texts_with_meta:
+                            proc_status.update(label="Extraction failed", state="error")
                             st.error(
                                 "No text could be extracted from the uploaded PDFs. "
                                 "Ensure the files are not scanned images or password-protected."
                             )
                         else:
+                            # Step 2 — chunking
+                            st.write("Chunking text…")
+                            prog.progress(0.4)
                             text_chunks, metadatas = get_text_chunks(
                                 texts_with_meta,
                                 strategy=st.session_state.chunk_strategy,
@@ -559,21 +571,36 @@ def main():
                                 semantic_threshold=st.session_state.semantic_threshold,
                                 api_key=get_api_key(),
                             )
+
+                            # Step 3 — embedding + FAISS
+                            st.write(f"Embedding {len(text_chunks)} chunks and building index…")
+                            prog.progress(0.55)
                             vectorstore = get_vectorstore(text_chunks, metadatas, api_key=get_api_key())
+
+                            # Step 4 — persist
+                            st.write("Saving index to disk…")
+                            prog.progress(0.9)
                             vectorstore.save_local(FAISS_INDEX_PATH)
                             save_index_metadata(
                                 filenames=[t[1] for t in texts_with_meta],
                                 chunk_count=len(text_chunks),
                             )
+                            prog.progress(1.0)
+
                             st.session_state.vectorstore = vectorstore
                             st.session_state.memory = ConversationBufferMemory(
                                 memory_key="chat_history", return_messages=True
                             )
                             st.session_state.chat_history = []
                             st.session_state.sources = []
-                            st.success("Documents processed and index saved!")
-                    except Exception as e:
-                        st.error(f"Error processing documents: {e}")
+                            proc_status.update(
+                                label=f"Done — {len(text_chunks)} chunks from "
+                                f"{len(texts_with_meta)} document(s)",
+                                state="complete",
+                                expanded=False,
+                            )
+                except Exception as e:
+                    st.error(f"Error processing documents: {e}")
 
         if os.path.exists(FAISS_INDEX_PATH):
             st.divider()
