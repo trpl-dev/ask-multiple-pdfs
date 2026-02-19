@@ -245,6 +245,36 @@ def get_conversation_chain(
 
 
 # ---------------------------------------------------------------------------
+# Suggested questions
+# ---------------------------------------------------------------------------
+
+
+def generate_suggested_questions(text_chunks, api_key=None, model=DEFAULT_MODEL):
+    """Ask the LLM to propose 3-5 questions that users could ask about the documents.
+
+    Takes a sample of the first ~3000 characters from the combined chunks and
+    returns a list of question strings. Returns an empty list on any error so
+    the caller can degrade gracefully.
+    """
+    sample = " ".join(text_chunks)[:3000].strip()
+    if not sample:
+        return []
+    prompt = (
+        "Based on the following document excerpt, suggest exactly 5 specific and useful "
+        "questions a user might ask. Return ONLY the questions, one per line, no numbering "
+        "or bullet points.\n\nExcerpt:\n" + sample
+    )
+    try:
+        kwargs = {"api_key": api_key} if api_key else {}
+        llm = ChatOpenAI(model=model, temperature=0.3, **kwargs)
+        result = llm.invoke(prompt)
+        lines = [ln.strip() for ln in result.content.splitlines() if ln.strip()]
+        return lines[:5]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # UI helpers
 # ---------------------------------------------------------------------------
 
@@ -387,6 +417,8 @@ def main():
         st.session_state.retrieval_mode = RETRIEVAL_MODES[0]
     if "system_prompt" not in st.session_state:
         st.session_state.system_prompt = ""
+    if "suggested_questions" not in st.session_state:
+        st.session_state.suggested_questions = []
 
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
@@ -400,6 +432,16 @@ def main():
 
     st.header("Chat with multiple PDFs :books:")
     render_chat_history()
+
+    # Show suggested questions as one-click buttons when the chat is still empty
+    if not st.session_state.chat_history and st.session_state.suggested_questions:
+        st.caption("Suggested questions — click to ask:")
+        cols = st.columns(len(st.session_state.suggested_questions))
+        for col, q in zip(cols, st.session_state.suggested_questions):
+            if col.button(q, use_container_width=True):
+                handle_userinput(q)
+                st.rerun()
+
     if user_question := st.chat_input("Ask a question about your documents:"):
         handle_userinput(user_question)
 
@@ -425,6 +467,7 @@ def main():
             st.session_state.memory = None
             st.session_state.chat_history = []
             st.session_state.sources = []
+            st.session_state.suggested_questions = []
 
         with st.expander("LLM & Retrieval", expanded=False):
             st.session_state.system_prompt = st.text_area(
@@ -480,6 +523,7 @@ def main():
             if st.button("New conversation", use_container_width=True):
                 st.session_state.chat_history = []
                 st.session_state.sources = []
+                st.session_state.suggested_questions = []
                 st.session_state.memory = ConversationBufferMemory(
                     memory_key="chat_history", return_messages=True
                 )
@@ -593,6 +637,12 @@ def main():
                             )
                             st.session_state.chat_history = []
                             st.session_state.sources = []
+
+                            # Generate suggested questions in the background step
+                            st.write("Generating suggested questions…")
+                            st.session_state.suggested_questions = generate_suggested_questions(
+                                text_chunks, api_key=get_api_key(), model=st.session_state.model
+                            )
                             proc_status.update(
                                 label=f"Done — {len(text_chunks)} chunks from "
                                 f"{len(texts_with_meta)} document(s)",
@@ -619,6 +669,7 @@ def main():
                 st.session_state.memory = None
                 st.session_state.chat_history = []
                 st.session_state.sources = []
+                st.session_state.suggested_questions = []
                 st.rerun()
 
 
