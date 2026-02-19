@@ -9,6 +9,7 @@ from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chains import ConversationalRetrievalChain
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
+from langchain.schema import AIMessage, Document, HumanMessage
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
@@ -20,6 +21,7 @@ from pypdf import PdfReader
 
 FAISS_INDEX_PATH = "faiss_index"
 FAISS_METADATA_PATH = os.path.join(FAISS_INDEX_PATH, "metadata.json")
+SESSIONS_DIR = "sessions"
 AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 CHUNK_STRATEGY_CHAR = "Character (fast)"
@@ -50,6 +52,85 @@ def load_index_metadata():
             return json.load(f)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Session persistence
+# ---------------------------------------------------------------------------
+
+
+def _serialize_messages(chat_history):
+    return [
+        {"type": "human" if isinstance(msg, HumanMessage) else "ai", "content": msg.content}
+        for msg in chat_history
+    ]
+
+
+def _deserialize_messages(data):
+    result = []
+    for d in data:
+        if d.get("type") == "human":
+            result.append(HumanMessage(content=d["content"]))
+        else:
+            result.append(AIMessage(content=d["content"]))
+    return result
+
+
+def _serialize_sources(sources):
+    return [
+        [{"page_content": doc.page_content, "metadata": doc.metadata} for doc in turn_sources]
+        for turn_sources in sources
+    ]
+
+
+def _deserialize_sources(raw):
+    return [
+        [Document(page_content=s["page_content"], metadata=s.get("metadata", {})) for s in turn]
+        for turn in raw
+    ]
+
+
+def list_sessions():
+    """Return sorted list of saved session names (without .json extension)."""
+    if not os.path.exists(SESSIONS_DIR):
+        return []
+    return sorted(f[:-5] for f in os.listdir(SESSIONS_DIR) if f.endswith(".json"))
+
+
+def save_session(name, chat_history, sources):
+    """Persist the current conversation to sessions/<name>.json."""
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    path = os.path.join(SESSIONS_DIR, f"{name}.json")
+    data = {
+        "name": name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "messages": _serialize_messages(chat_history),
+        "sources": _serialize_sources(sources),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_session(name):
+    """Load a saved session; returns (chat_history, sources) or (None, None)."""
+    path = os.path.join(SESSIONS_DIR, f"{name}.json")
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return _deserialize_messages(data.get("messages", [])), _deserialize_sources(
+            data.get("sources", [])
+        )
+    except Exception:
+        return None, None
+
+
+def delete_session(name):
+    """Delete a saved session file."""
+    path = os.path.join(SESSIONS_DIR, f"{name}.json")
+    if os.path.exists(path):
+        os.remove(path)
 
 
 def get_api_key():
@@ -528,6 +609,52 @@ def main():
                     memory_key="chat_history", return_messages=True
                 )
                 st.rerun()
+
+        st.divider()
+        with st.expander("Sessions", expanded=False):
+            saved = list_sessions()
+            new_name = st.text_input(
+                "Session name",
+                placeholder="my-session",
+                key="session_name_input",
+            )
+            if st.button("Save session", use_container_width=True, disabled=not new_name):
+                if st.session_state.chat_history:
+                    save_session(
+                        new_name.strip(),
+                        st.session_state.chat_history,
+                        st.session_state.sources,
+                    )
+                    st.success(f"Saved as '{new_name.strip()}'")
+                else:
+                    st.warning("Nothing to save — start a conversation first.")
+
+            if saved:
+                selected_session = st.selectbox("Load session", [""] + saved)
+                load_col, del_col2 = st.columns(2)
+                if load_col.button("Load", use_container_width=True, disabled=not selected_session):
+                    hist, srcs = load_session(selected_session)
+                    if hist is not None:
+                        st.session_state.chat_history = hist
+                        st.session_state.sources = srcs
+                        st.session_state.suggested_questions = []
+                        st.session_state.memory = ConversationBufferMemory(
+                            memory_key="chat_history", return_messages=True
+                        )
+                        # Replay history into memory so the chain has context
+                        for i in range(0, len(hist) - 1, 2):
+                            st.session_state.memory.save_context(
+                                {"input": hist[i].content},
+                                {"output": hist[i + 1].content if i + 1 < len(hist) else ""},
+                            )
+                        st.rerun()
+                    else:
+                        st.error("Could not load session.")
+                if del_col2.button("Delete", use_container_width=True, disabled=not selected_session):
+                    delete_session(selected_session)
+                    st.rerun()
+            else:
+                st.caption("No saved sessions yet.")
 
         st.subheader("Your documents")
         with st.expander("Chunking settings", expanded=False):
