@@ -13,7 +13,7 @@ pytest>=8.0.0
 # uncomment to use huggingface llms
 # huggingface-hub>=0.20.0
 
-# uncomment to use instructor embeddings
+# uncomment to use instructor embeddings or cross-encoder re-ranking
 # InstructorEmbedding>=1.0.1
 # sentence-transformers>=2.2.2
 
