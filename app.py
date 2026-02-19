@@ -12,6 +12,8 @@ from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.schema import AIMessage, BaseMessage, Document, HumanMessage
 from langchain_community.vectorstores import FAISS
+from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.retrievers import BaseRetriever
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
 from pypdf import PdfReader
@@ -287,6 +289,7 @@ def get_conversation_chain(
     retrieval_k: int = DEFAULT_RETRIEVAL_K,
     retrieval_mode: str = "Similarity",
     system_prompt: str = "",
+    reranker_enabled: bool = False,
 ) -> ConversationalRetrievalChain:
     """Build a ConversationalRetrievalChain.
 
@@ -302,13 +305,22 @@ def get_conversation_chain(
     condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
     # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature": 0.5, "max_length": 512})
 
+    fetch_k = max(retrieval_k * 4, 20)
     if retrieval_mode == "MMR":
-        retriever = vectorstore.as_retriever(
+        base_ret = vectorstore.as_retriever(
             search_type="mmr",
-            search_kwargs={"k": retrieval_k, "fetch_k": max(retrieval_k * 3, 20)},
+            search_kwargs={"k": fetch_k if reranker_enabled else retrieval_k, "fetch_k": fetch_k},
         )
     else:
-        retriever = vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
+        base_ret = vectorstore.as_retriever(
+            search_kwargs={"k": fetch_k if reranker_enabled else retrieval_k}
+        )
+
+    retriever = (
+        RerankingRetriever(base_retriever=base_ret, top_k=retrieval_k, fetch_k=fetch_k)
+        if reranker_enabled
+        else base_ret
+    )
 
     prefix = f"{system_prompt.strip()}\n\n" if system_prompt.strip() else ""
     qa_template = (
@@ -328,6 +340,47 @@ def get_conversation_chain(
         combine_docs_chain_kwargs={"prompt": qa_prompt},
     )
     return conversation_chain
+
+
+# ---------------------------------------------------------------------------
+# Cross-encoder re-ranking retriever (opt-in; requires sentence-transformers)
+# ---------------------------------------------------------------------------
+
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+class RerankingRetriever(BaseRetriever):
+    """Wraps any retriever and re-ranks its candidates with a cross-encoder.
+
+    Fetches up to ``fetch_k`` documents from the base retriever, scores them
+    with a cross-encoder, and returns the ``top_k`` highest-scoring ones.
+    Falls back to the original ordering when sentence-transformers is not
+    installed or an error occurs.
+    """
+
+    base_retriever: Any
+    top_k: int = DEFAULT_RETRIEVAL_K
+    fetch_k: int = DEFAULT_RETRIEVAL_K * 4
+    model_name: str = RERANKER_MODEL
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        candidates = self.base_retriever.get_relevant_documents(query)
+        if len(candidates) <= 1:
+            return candidates[: self.top_k]
+        try:
+            from sentence_transformers import CrossEncoder  # noqa: PLC0415
+
+            encoder = CrossEncoder(self.model_name)
+            scores = encoder.predict([(query, d.page_content) for d in candidates])
+            ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+            return [doc for _, doc in ranked[: self.top_k]]
+        except Exception:
+            return candidates[: self.top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +508,7 @@ def handle_userinput(user_question: str) -> None:
                 retrieval_k=st.session_state.retrieval_k,
                 retrieval_mode=st.session_state.retrieval_mode,
                 system_prompt=st.session_state.system_prompt,
+                reranker_enabled=st.session_state.reranker_enabled,
             )
             response = chain.invoke({"question": user_question})
             new_sources = response.get("source_documents", [])
@@ -509,6 +563,8 @@ def main() -> None:
         st.session_state.system_prompt = ""
     if "suggested_questions" not in st.session_state:
         st.session_state.suggested_questions = []
+    if "reranker_enabled" not in st.session_state:
+        st.session_state.reranker_enabled = False
 
     # Auto-load a previously saved FAISS index so users don't have to re-upload
     # PDFs after a page reload or server restart.
@@ -594,6 +650,15 @@ def main() -> None:
                 help=(
                     "Similarity: closest chunks by cosine distance.  \n"
                     "MMR: balances relevance with diversity to avoid repetitive chunks."
+                ),
+            )
+            st.session_state.reranker_enabled = st.toggle(
+                "Cross-encoder re-ranking",
+                value=st.session_state.reranker_enabled,
+                help=(
+                    "Re-rank retrieved chunks with a cross-encoder before answering.  \n"
+                    "Requires `sentence-transformers` (`pip install sentence-transformers`).  \n"
+                    "First use downloads ~50 MB model weights."
                 ),
             )
 
