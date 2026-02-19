@@ -1,62 +1,113 @@
 # MultiPDF Chat App
 
-> You can find the tutorial for this project on [YouTube](https://youtu.be/dXxQ0LR-3Hg).
+> Tutorial video: [YouTube](https://youtu.be/dXxQ0LR-3Hg)
 
 ## Introduction
-------------
-The MultiPDF Chat App is a Python application that allows you to chat with multiple PDF documents. You can ask questions about the PDFs using natural language, and the application will provide relevant responses based on the content of the documents. This app utilizes a language model to generate accurate answers to your queries. Please note that the app will only respond to questions related to the loaded PDFs.
+
+The MultiPDF Chat App lets you upload multiple PDF documents and ask natural language questions about their content via a conversational chat interface. It is built on a Retrieval-Augmented Generation (RAG) pipeline using LangChain, OpenAI, FAISS, and Streamlit.
 
 ## How It Works
-------------
 
 ![MultiPDF Chat App Diagram](./docs/PDF-LangChain.jpg)
 
-The application follows these steps to provide responses to your questions:
+1. **PDF Loading** — Upload one or more PDFs; text is extracted page by page.
+2. **Chunking** — Text is split into overlapping chunks (character-based or semantic).
+3. **Embedding** — Each chunk is embedded with OpenAI Embeddings and stored in a FAISS vector index.
+4. **Retrieval** — On each question, the most relevant chunks are retrieved (Similarity or MMR).
+5. **Answer Generation** — Retrieved chunks are passed to a ChatOpenAI model; the answer streams token-by-token into the chat bubble.
 
-1. PDF Loading: The app reads multiple PDF documents and extracts their text content.
+## Features
 
-2. Text Chunking: The extracted text is divided into smaller chunks that can be processed effectively.
+| Feature | Description |
+|---|---|
+| Multi-PDF chat | Upload and query multiple PDFs simultaneously |
+| Streaming answers | Token-level streaming with a live cursor |
+| Source attribution | Expandable source snippets below each answer |
+| Model selection | Choose between `gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o` |
+| System prompt | Optional instructions prepended to every QA prompt |
+| Temperature & k | Tune creativity and number of retrieved chunks |
+| Retrieval mode | Similarity or MMR (diversity-aware) |
+| Chunking UI | Character splitter (configurable size/overlap) or Semantic splitter |
+| Suggested questions | LLM-generated one-click questions after processing |
+| Conversation export | Download chat history as Markdown |
+| Session persistence | Save, load, and delete named chat sessions (JSON) |
+| Multiple index slots | Maintain independent FAISS indexes per project/topic |
+| Cross-encoder re-ranking | Opt-in reranking with `sentence-transformers` |
+| Docker support | One-command startup with `docker compose up` |
 
-3. Language Model: The application utilizes a language model to generate vector representations (embeddings) of the text chunks.
+## Installation
 
-4. Similarity Matching: When you ask a question, the app compares it with the text chunks and identifies the most semantically similar ones.
+### Local
 
-5. Response Generation: The selected chunks are passed to the language model, which generates a response based on the relevant content of the PDFs.
+```bash
+git clone <repo-url>
+cd ask-multiple-pdfs
 
-## Dependencies and Installation
-----------------------------
-To install the MultiPDF Chat App, please follow these steps:
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 
-1. Clone the repository to your local machine.
+pip install -r requirements.txt   # or: make install
 
-2. Install the required dependencies by running the following command:
-   ```
-   pip install -r requirements.txt
-   ```
+cp .env.example .env
+# Edit .env and set OPENAI_API_KEY=<your-key>
+```
 
-3. Obtain an API key from OpenAI and add it to the `.env` file in the project directory.
+### Docker
+
+```bash
+cp .env.example .env
+# Edit .env and set OPENAI_API_KEY=<your-key>
+
+make docker-up   # or: docker compose up --build -d
+```
+
+The app is then available at **http://localhost:8501**.
+The FAISS index and saved sessions are persisted in `faiss_indexes/` and `sessions/` via volume mounts.
 
 ## Usage
------
-To use the MultiPDF Chat App, follow these steps:
 
-1. Ensure that you have installed the required dependencies and added the OpenAI API key to the `.env` file.
+```bash
+make run   # or: streamlit run app.py
+```
 
-2. Run the `main.py` file using the Streamlit CLI. Execute the following command:
-   ```
-   streamlit run app.py
-   ```
+1. Enter your OpenAI API key in the sidebar (or set `OPENAI_API_KEY` in `.env`).
+2. Upload one or more PDF files and click **Process**.
+3. Watch the progress bar as your documents are extracted, chunked, embedded, and indexed.
+4. Use the suggested question buttons or type your own question.
+5. Each answer streams in real time with a collapsible **Sources** expander below.
 
-3. The application will launch in your default web browser, displaying the user interface.
+### Sidebar Options
 
-4. Load multiple PDF documents into the app by following the provided instructions.
+| Section | Options |
+|---|---|
+| **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking |
+| **Sessions** | Save/load/delete named chat sessions |
+| **Index slots** | Create and switch between independent FAISS indexes |
+| **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |
 
-5. Ask questions in natural language about the loaded PDFs using the chat interface.
+## Optional Dependencies
+
+Uncomment the relevant lines in `requirements.txt` and run `make install`:
+
+| Package | Enables |
+|---|---|
+| `sentence-transformers>=2.2.2` | Cross-encoder re-ranking + Instructor embeddings |
+| `InstructorEmbedding>=1.0.1` | HuggingFace Instructor embeddings |
+| `huggingface-hub>=0.20.0` | HuggingFace LLM backend |
+| `langchain-experimental>=0.0.60` | Semantic chunking strategy |
+
+## Development
+
+```bash
+make lint      # ruff linter
+make format    # ruff formatter
+make test      # pytest (17 unit tests)
+```
 
 ## Contributing
-------------
-This repository is intended for educational purposes and does not accept further contributions. It serves as supporting material for a YouTube tutorial that demonstrates how to build this project. Feel free to utilize and enhance the app based on your own requirements.
+
+This repository is intended for educational purposes and does not accept further contributions. Feel free to fork and adapt it to your own needs.
 
 ## License
--------
-The MultiPDF Chat App is released under the [MIT License](https://opensource.org/licenses/MIT).
+
+Released under the [MIT License](https://opensource.org/licenses/MIT).
