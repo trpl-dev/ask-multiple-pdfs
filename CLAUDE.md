@@ -94,7 +94,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`StreamHandler(BaseCallbackHandler)`** — appends `▌` cursor on each token; removes it on LLM end. Uses `st.empty()` placeholder passed at construction time.
 
-**`get_pdf_text(pdf_docs)`** → `list[tuple[str, str]]` — returns `(text, filename)` tuples; skips files with no extractable text.
+**`get_pdf_text(pdf_docs)`** → `list[tuple[str, str, int]]` — returns `(text, filename, page_number)` tuples (one per page); skips pages with no extractable text and emits `st.warning()` for files that fail to open.
 
 **`get_text_chunks(texts_with_meta, strategy, chunk_size, chunk_overlap, semantic_threshold, api_key)`** → `tuple[list[str], list[dict]]` — supports:
 - `CHUNK_STRATEGY_CHAR`: `CharacterTextSplitter(separator="\n", ...)`
@@ -134,9 +134,10 @@ No longer imported by `app.py` (replaced by native `st.chat_message()` in Step 2
 
 | File | Tests | What it covers |
 |---|---|---|
-| `test_chunking.py` | 7 | `get_text_chunks()`: parallel list lengths, metadata keys, multi-file attribution, chunk size bounds, relative chunk count, empty input, `ValueError` on `chunk_overlap > chunk_size` |
+| `test_chunking.py` | 9 | `get_text_chunks()`: parallel list lengths, metadata keys, multi-file/page attribution, chunk size bounds, relative chunk count, empty input, `ValueError` on `chunk_overlap > chunk_size` |
 | `test_pdf.py` | 5 | `get_pdf_text()`: single/multiple PDFs, no-text excluded, broken PDF warning, mixed good/broken |
 | `test_metadata.py` | 5 | `save_index_metadata()` / `load_index_metadata()`: roundtrip, missing file → None, corrupt JSON → None, overwrite, UTC ISO timestamp |
+| `test_sessions.py` | 18 | `_serialize/deserialize_messages()`, `_serialize/deserialize_sources()`, `save/load/list/delete_session()`, `_safe_name()`, `_truncate_history()` |
 
 ---
 
@@ -206,7 +207,7 @@ make run   # or: streamlit run app.py
 | `make install` | Install all dependencies from `requirements.txt` |
 | `make lint` | Run ruff linter |
 | `make format` | Run ruff formatter |
-| `make test` | Run pytest (17 unit tests) |
+| `make test` | Run pytest (37 unit tests) |
 | `make docker-build` | Build Docker image |
 | `make docker-up` | Build and start via Docker Compose (detached) |
 | `make docker-down` | Stop Docker Compose services |
@@ -217,7 +218,8 @@ make run   # or: streamlit run app.py
 
 | Package | Version Range | Purpose |
 |---|---|---|
-| `langchain` | `>=0.3.0` | LCEL chains, prompts, base classes |
+| `langchain` | `>=0.3.0` | Base package; pulls in shared utilities |
+| `langchain-classic` | `>=1.0.0` | `create_history_aware_retriever`, `create_retrieval_chain`, `create_stuff_documents_chain` |
 | `langchain-openai` | `>=0.2.0` | OpenAI embeddings and chat models |
 | `langchain-community` | `>=0.3.0` | FAISS vector store, HuggingFace integrations |
 | `langchain-text-splitters` | `>=0.3.0` | `CharacterTextSplitter` |
@@ -228,10 +230,10 @@ make run   # or: streamlit run app.py
 | `pytest` | `>=8.0.0` | Unit testing |
 
 **Optional (uncomment in `requirements.txt`)**:
-- `sentence-transformers>=2.2.2` — cross-encoder re-ranking + Instructor embeddings
+- `sentence-transformers>=3.0.0` — cross-encoder re-ranking + Instructor embeddings
 - `InstructorEmbedding>=1.0.1` — Instructor embedding model
 - `huggingface-hub>=0.20.0` — HuggingFace LLM backend
-- `langchain-experimental>=0.0.60` — `SemanticChunker` for semantic chunking
+- `langchain-experimental>=0.3.0` — `SemanticChunker` for semantic chunking
 
 ---
 
@@ -271,7 +273,7 @@ make format   # auto-fix formatting
 
 3. **Semantic chunking requires opt-in install** — Uncomment `langchain-experimental` in `requirements.txt` and run `make install`.
 
-4. **No truncation of conversation history** — The full `chat_history` list is passed to every chain invocation. For very long sessions, token limits may eventually be exceeded.
+4. **History sent to the LLM is truncated, but the full log is kept in session state** — `_truncate_history()` caps the context at `MAX_HISTORY_TURNS` (20) pairs before each chain invocation, preventing token-limit errors. The full `st.session_state.chat_history` is still stored and displayed in the UI.
 
 5. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
 

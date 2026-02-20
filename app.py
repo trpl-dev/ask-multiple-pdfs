@@ -7,17 +7,19 @@ from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.schema import AIMessage, BaseMessage, Document, HumanMessage
+from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
+from pydantic import ConfigDict
 from pypdf import PdfReader
 
 # Uncomment for HuggingFace alternatives:
@@ -68,9 +70,7 @@ def list_index_slots() -> list[str]:
     """Return sorted list of existing index slot names."""
     if not os.path.exists(FAISS_INDEXES_DIR):
         return []
-    return sorted(
-        d for d in os.listdir(FAISS_INDEXES_DIR) if os.path.isdir(slot_path(d))
-    )
+    return sorted(d for d in os.listdir(FAISS_INDEXES_DIR) if os.path.isdir(slot_path(d)))
 
 
 def save_index_metadata(filenames: list[str], chunk_count: int, index_path: str) -> None:
@@ -435,13 +435,12 @@ class RerankingRetriever(BaseRetriever):
     installed or an error occurs.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     base_retriever: Any
     top_k: int = DEFAULT_RETRIEVAL_K
     fetch_k: int = DEFAULT_RETRIEVAL_K * 4
     model_name: str = RERANKER_MODEL
-
-    class Config:
-        arbitrary_types_allowed = True
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
@@ -811,7 +810,9 @@ def main() -> None:
                         st.rerun()
                     else:
                         st.error("Could not load session.")
-                if del_col2.button("Delete", use_container_width=True, disabled=not selected_session):
+                if del_col2.button(
+                    "Delete", use_container_width=True, disabled=not selected_session
+                ):
                     delete_session(selected_session)
                     st.rerun()
             else:
@@ -966,7 +967,9 @@ def main() -> None:
                             # Step 3 — embedding + FAISS
                             st.write(f"Embedding {len(text_chunks)} chunks and building index…")
                             prog.progress(0.55)
-                            vectorstore = get_vectorstore(text_chunks, metadatas, api_key=get_api_key())
+                            vectorstore = get_vectorstore(
+                                text_chunks, metadatas, api_key=get_api_key()
+                            )
 
                             # Step 4 — persist
                             st.write("Saving index to disk…")
@@ -974,7 +977,7 @@ def main() -> None:
                             os.makedirs(active_path, exist_ok=True)
                             vectorstore.save_local(active_path)
                             save_index_metadata(
-                                filenames=[t[1] for t in texts_with_meta],
+                                filenames=list(dict.fromkeys(t[1] for t in texts_with_meta)),
                                 chunk_count=len(text_chunks),
                                 index_path=active_path,
                             )
@@ -991,7 +994,7 @@ def main() -> None:
                             )
                             proc_status.update(
                                 label=f"Done — {len(text_chunks)} chunks from "
-                                f"{len(texts_with_meta)} document(s)",
+                                f"{len(pdf_docs)} document(s)",
                                 state="complete",
                                 expanded=False,
                             )
