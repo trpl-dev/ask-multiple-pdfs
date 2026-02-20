@@ -18,7 +18,7 @@ def _make_mock_upload(name, page_texts):
     return mock_pdf, pages
 
 
-def test_single_pdf_returns_one_tuple():
+def test_single_pdf_returns_page_tuples():
     mock_pdf, pages = _make_mock_upload("report.pdf", ["Page 1 content", "Page 2 content"])
     with patch("app.PdfReader") as mock_reader_cls, patch("app.st"):
         mock_reader = MagicMock()
@@ -27,14 +27,18 @@ def test_single_pdf_returns_one_tuple():
 
         result = get_pdf_text([mock_pdf])
 
-    assert len(result) == 1
-    text, filename = result[0]
-    assert filename == "report.pdf"
-    assert "Page 1 content" in text
-    assert "Page 2 content" in text
+    # Two pages → two tuples
+    assert len(result) == 2
+    text0, filename0, page_num0 = result[0]
+    text1, filename1, page_num1 = result[1]
+    assert filename0 == filename1 == "report.pdf"
+    assert "Page 1 content" in text0
+    assert "Page 2 content" in text1
+    assert page_num0 == 1
+    assert page_num1 == 2
 
 
-def test_multiple_pdfs_return_multiple_tuples():
+def test_multiple_pdfs_return_page_tuples():
     mock_a, pages_a = _make_mock_upload("a.pdf", ["Alpha"])
     mock_b, pages_b = _make_mock_upload("b.pdf", ["Beta"])
 
@@ -47,9 +51,9 @@ def test_multiple_pdfs_return_multiple_tuples():
         result = get_pdf_text([mock_a, mock_b])
 
     assert len(result) == 2
-    names = [r[1] for r in result]
-    assert "a.pdf" in names
-    assert "b.pdf" in names
+    filenames = [r[1] for r in result]
+    assert "a.pdf" in filenames
+    assert "b.pdf" in filenames
 
 
 def test_pdf_with_no_extractable_text_is_excluded():
