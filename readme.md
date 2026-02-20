@@ -72,19 +72,21 @@ make run   # or: streamlit run app.py
 ```
 
 1. Enter your OpenAI API key in the sidebar (or set `OPENAI_API_KEY` in `.env`).
-2. Upload one or more PDF files and click **Process**.
+2. Upload one or more PDF files under **Your documents** in the sidebar and click **Process**.
 3. Watch the progress bar as your documents are extracted, chunked, embedded, and indexed.
-4. Use the suggested question buttons or type your own question.
+4. Use the suggested question buttons (up to 3 per row) or type your own question.
 5. Each answer streams in real time with a collapsible **Sources** expander below.
+6. The active index slot is shown below the page header; switch slots any time from the sidebar.
 
 ### Sidebar Options
 
 | Section | Options |
 |---|---|
 | **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking |
-| **Sessions** | Save/load/delete named chat sessions |
+| **Sessions** | Save/load/delete named chat sessions (delete requires confirmation) |
 | **Index slots** | Create and switch between independent FAISS indexes |
 | **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |
+| **Your documents** | Index status indicator, PDF uploader, Process button, Clear saved index |
 
 ## Optional Dependencies
 
@@ -92,17 +94,17 @@ Uncomment the relevant lines in `requirements.txt` and run `make install`:
 
 | Package | Enables |
 |---|---|
-| `sentence-transformers>=2.2.2` | Cross-encoder re-ranking + Instructor embeddings |
+| `sentence-transformers>=3.0.0` | Cross-encoder re-ranking + Instructor embeddings |
 | `InstructorEmbedding>=1.0.1` | HuggingFace Instructor embeddings |
 | `huggingface-hub>=0.20.0` | HuggingFace LLM backend |
-| `langchain-experimental>=0.0.60` | Semantic chunking strategy |
+| `langchain-experimental>=0.3.0` | Semantic chunking strategy |
 
 ## Development
 
 ```bash
 make lint      # ruff linter
 make format    # ruff formatter
-make test      # pytest (17 unit tests)
+make test      # pytest (37 unit tests)
 ```
 
 ## Contributing

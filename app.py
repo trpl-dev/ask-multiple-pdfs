@@ -673,16 +673,29 @@ def main() -> None:
             st.session_state.vectorstore = vs
 
     st.header("Chat with multiple PDFs :books:")
+    st.caption(f"Slot: **{st.session_state.active_slot}**")
     render_chat_history()
 
-    # Show suggested questions as one-click buttons when the chat is still empty
+    # Welcome screen when no index is loaded and conversation is empty
+    if st.session_state.vectorstore is None and not st.session_state.chat_history:
+        st.info(
+            "**Get started in 3 steps:**\n\n"
+            "1. Enter your OpenAI API key in the sidebar.\n"
+            "2. Upload one or more PDF files under **Your documents**.\n"
+            "3. Click **Process** — then ask anything below!"
+        )
+
+    # Show suggested questions as one-click buttons (max 3 per row) when the chat is still empty
     if not st.session_state.chat_history and st.session_state.suggested_questions:
         st.caption("Suggested questions — click to ask:")
-        cols = st.columns(len(st.session_state.suggested_questions))
-        for col, q in zip(cols, st.session_state.suggested_questions):
-            if col.button(q, use_container_width=True):
-                handle_userinput(q)
-                st.rerun()
+        questions = st.session_state.suggested_questions
+        for row_start in range(0, len(questions), 3):
+            batch = questions[row_start : row_start + 3]
+            cols = st.columns(len(batch))
+            for col, q in zip(cols, batch):
+                if col.button(q, use_container_width=True):
+                    handle_userinput(q)
+                    st.rerun()
 
     if user_question := st.chat_input("Ask a question about your documents:"):
         handle_userinput(user_question)
@@ -709,6 +722,7 @@ def main() -> None:
             st.session_state.chat_history = []
             st.session_state.sources = []
             st.session_state.suggested_questions = []
+            st.toast(f"Switched to {selected_model} — chat history cleared.", icon="ℹ️")
 
         with st.expander("LLM & Retrieval", expanded=False):
             st.session_state.system_prompt = st.text_area(
@@ -810,8 +824,15 @@ def main() -> None:
                         st.rerun()
                     else:
                         st.error("Could not load session.")
+                confirm_del_session = del_col2.checkbox(
+                    "Confirm delete",
+                    key="confirm_del_session",
+                    help="Tick to enable session deletion.",
+                )
                 if del_col2.button(
-                    "Delete", use_container_width=True, disabled=not selected_session
+                    "Delete",
+                    use_container_width=True,
+                    disabled=not selected_session or not confirm_del_session,
                 ):
                     delete_session(selected_session)
                     st.rerun()
@@ -873,6 +894,10 @@ def main() -> None:
                 st.rerun()
 
         st.subheader("Your documents")
+        if st.session_state.vectorstore is not None:
+            st.success("Index loaded — ready to chat.", icon="✅")
+        else:
+            st.info("No index loaded. Upload PDFs and click **Process**.", icon="ℹ️")
         with st.expander("Chunking settings", expanded=False):
             selected_strategy = st.radio(
                 "Strategy",
@@ -1007,7 +1032,12 @@ def main() -> None:
             if meta:
                 ts = datetime.fromisoformat(meta["timestamp"])
                 age_min = int((datetime.now(timezone.utc) - ts).total_seconds() / 60)
-                age_str = f"{age_min} min ago" if age_min < 60 else f"{age_min // 60} h ago"
+                if age_min < 60:
+                    age_str = f"{age_min} min ago"
+                elif age_min < 60 * 24:
+                    age_str = f"{age_min // 60} h ago"
+                else:
+                    age_str = f"{age_min // (60 * 24)} d ago"
                 st.caption(
                     f"**Index loaded** · {meta['chunks']} chunks · {age_str}  \n"
                     + ", ".join(meta["files"])
