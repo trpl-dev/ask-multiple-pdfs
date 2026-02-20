@@ -13,6 +13,9 @@ pytest>=8.0.0
 pytest-cov>=5.0.0
 ruff>=0.4.0
 
+# uncomment to use Ollama as a local model server
+# langchain-ollama>=0.2.0
+
 # uncomment to use huggingface llms
 # huggingface-hub>=0.20.0
 

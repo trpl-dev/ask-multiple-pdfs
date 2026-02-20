@@ -39,6 +39,13 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_RETRIEVAL_K = 4
 MAX_HISTORY_TURNS = 20  # keep at most this many human/AI turn pairs in context
 
+PROVIDER_OPENAI = "OpenAI"
+PROVIDER_OLLAMA = "Ollama (local)"
+PROVIDERS = [PROVIDER_OPENAI, PROVIDER_OLLAMA]
+OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
+OLLAMA_DEFAULT_MODEL = "llama3.2"
+OLLAMA_DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+
 # Only safe characters for user-supplied slot and session names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][\w\-. ]*$")
 
@@ -245,6 +252,9 @@ def get_text_chunks(
     chunk_overlap: int = 200,
     semantic_threshold: int = 95,
     api_key: str | None = None,
+    provider: str = PROVIDER_OPENAI,
+    ollama_embedding_model: str = OLLAMA_DEFAULT_EMBEDDING_MODEL,
+    ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
 ) -> tuple[list[str], list[dict]]:
     """Split each page's text into chunks; returns (chunks, metadatas).
 
@@ -256,6 +266,9 @@ def get_text_chunks(
         semantic_threshold: Semantic strategy — percentile threshold (0–100)
             for splitting; lower → more (smaller) chunks
         api_key: OpenAI API key forwarded to SemanticChunker embeddings
+        provider: PROVIDER_OPENAI or PROVIDER_OLLAMA
+        ollama_embedding_model: Ollama embedding model name for semantic chunking
+        ollama_base_url: Ollama server base URL for semantic chunking
 
     Returns:
         Tuple of (list[str], list[dict]) — the text chunks and their FAISS
@@ -269,9 +282,9 @@ def get_text_chunks(
                 "Semantic chunking requires 'langchain-experimental'. "
                 "Uncomment it in requirements.txt and run `make install`."
             )
-        kwargs = {"api_key": api_key} if api_key else {}
+        embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
         splitter = SemanticChunker(
-            OpenAIEmbeddings(**kwargs),
+            embeddings,
             breakpoint_threshold_type="percentile",
             breakpoint_threshold_amount=semantic_threshold,
         )
@@ -297,25 +310,51 @@ def get_text_chunks(
     return all_chunks, all_meta
 
 
-def get_vectorstore(
-    text_chunks: list[str], metadatas: list[dict] | None = None, api_key: str | None = None
-) -> FAISS:
+def _get_embeddings(
+    provider: str,
+    api_key: str | None,
+    ollama_embedding_model: str,
+    ollama_base_url: str,
+) -> Any:
+    """Return the appropriate embeddings object for the given provider."""
+    if provider == PROVIDER_OLLAMA:
+        try:
+            from langchain_ollama import OllamaEmbeddings  # noqa: PLC0415
+        except ImportError:
+            raise ImportError(
+                "Ollama support requires 'langchain-ollama'. "
+                "Uncomment it in requirements.txt and run `make install`."
+            )
+        return OllamaEmbeddings(model=ollama_embedding_model, base_url=ollama_base_url)
     kwargs = {"api_key": api_key} if api_key else {}
-    embeddings = OpenAIEmbeddings(**kwargs)
+    return OpenAIEmbeddings(**kwargs)
+
+
+def get_vectorstore(
+    text_chunks: list[str],
+    metadatas: list[dict] | None = None,
+    api_key: str | None = None,
+    provider: str = PROVIDER_OPENAI,
+    ollama_embedding_model: str = OLLAMA_DEFAULT_EMBEDDING_MODEL,
+    ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
+) -> FAISS:
+    embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
     # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
-    vectorstore = FAISS.from_texts(
-        texts=text_chunks, embedding=embeddings, metadatas=metadatas or []
-    )
-    return vectorstore
+    return FAISS.from_texts(texts=text_chunks, embedding=embeddings, metadatas=metadatas or [])
 
 
-def load_vectorstore(index_path: str, api_key: str | None = None) -> FAISS | None:
+def load_vectorstore(
+    index_path: str,
+    api_key: str | None = None,
+    provider: str = PROVIDER_OPENAI,
+    ollama_embedding_model: str = OLLAMA_DEFAULT_EMBEDDING_MODEL,
+    ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
+) -> FAISS | None:
     """Load a previously saved FAISS index from disk. Returns None on failure."""
     if not os.path.exists(index_path):
         return None
     try:
-        kwargs = {"api_key": api_key} if api_key else {}
-        embeddings = OpenAIEmbeddings(**kwargs)
+        embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
         return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
         st.warning(f"Could not load saved index: {e}")
@@ -332,6 +371,8 @@ def get_conversation_chain(
     retrieval_mode: str = "Similarity",
     system_prompt: str = "",
     reranker_enabled: bool = False,
+    provider: str = PROVIDER_OPENAI,
+    ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
 ) -> Runnable:
     """Build an LCEL conversational RAG chain (LangChain 0.3+).
 
@@ -342,12 +383,29 @@ def get_conversation_chain(
     Chat history is passed explicitly on each invocation — no memory object
     is required.
     """
-    kwargs = {"api_key": api_key} if api_key else {}
     callbacks = [stream_handler] if stream_handler else []
-    answer_llm = ChatOpenAI(
-        model=model, temperature=temperature, streaming=True, callbacks=callbacks, **kwargs
-    )
-    condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
+    if provider == PROVIDER_OLLAMA:
+        try:
+            from langchain_ollama import ChatOllama  # noqa: PLC0415
+        except ImportError:
+            raise ImportError(
+                "Ollama support requires 'langchain-ollama'. "
+                "Uncomment it in requirements.txt and run `make install`."
+            )
+        answer_llm = ChatOllama(
+            model=model,
+            base_url=ollama_base_url,
+            temperature=temperature,
+            streaming=True,
+            callbacks=callbacks,
+        )
+        condense_llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0)
+    else:
+        kwargs = {"api_key": api_key} if api_key else {}
+        answer_llm = ChatOpenAI(
+            model=model, temperature=temperature, streaming=True, callbacks=callbacks, **kwargs
+        )
+        condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
 
     # --- Retriever (with optional re-ranking) ---
     fetch_k = max(retrieval_k * 4, 20)
@@ -465,7 +523,11 @@ class RerankingRetriever(BaseRetriever):
 
 
 def generate_suggested_questions(
-    text_chunks: list[str], api_key: str | None = None, model: str = DEFAULT_MODEL
+    text_chunks: list[str],
+    api_key: str | None = None,
+    model: str = DEFAULT_MODEL,
+    provider: str = PROVIDER_OPENAI,
+    ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
 ) -> list[str]:
     """Ask the LLM to propose 3-5 questions that users could ask about the documents.
 
@@ -482,8 +544,15 @@ def generate_suggested_questions(
         "or bullet points.\n\nExcerpt:\n" + sample
     )
     try:
-        kwargs = {"api_key": api_key} if api_key else {}
-        llm = ChatOpenAI(model=model, temperature=0.3, **kwargs)
+        if provider == PROVIDER_OLLAMA:
+            try:
+                from langchain_ollama import ChatOllama  # noqa: PLC0415
+            except ImportError:
+                return []
+            llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0.3)
+        else:
+            kwargs = {"api_key": api_key} if api_key else {}
+            llm = ChatOpenAI(model=model, temperature=0.3, **kwargs)
         result = llm.invoke(prompt)
         lines = [ln.strip() for ln in result.content.splitlines() if ln.strip()]
         return lines[:5]
@@ -589,9 +658,14 @@ def handle_userinput(user_question: str) -> None:
         stream_handler = StreamHandler(stream_container)
 
         try:
+            active_model = (
+                st.session_state.ollama_model
+                if st.session_state.provider == PROVIDER_OLLAMA
+                else st.session_state.model
+            )
             chain = get_conversation_chain(
                 st.session_state.vectorstore,
-                st.session_state.model,
+                active_model,
                 stream_handler,
                 api_key=get_api_key(),
                 temperature=st.session_state.temperature,
@@ -599,6 +673,8 @@ def handle_userinput(user_question: str) -> None:
                 retrieval_mode=st.session_state.retrieval_mode,
                 system_prompt=st.session_state.system_prompt,
                 reranker_enabled=st.session_state.reranker_enabled,
+                provider=st.session_state.provider,
+                ollama_base_url=st.session_state.ollama_base_url,
             )
             response = chain.invoke(
                 {
@@ -664,11 +740,25 @@ def main() -> None:
         st.session_state.reranker_enabled = False
     if "active_slot" not in st.session_state:
         st.session_state.active_slot = DEFAULT_SLOT
+    if "provider" not in st.session_state:
+        st.session_state.provider = PROVIDER_OPENAI
+    if "ollama_model" not in st.session_state:
+        st.session_state.ollama_model = OLLAMA_DEFAULT_MODEL
+    if "ollama_embedding_model" not in st.session_state:
+        st.session_state.ollama_embedding_model = OLLAMA_DEFAULT_EMBEDDING_MODEL
+    if "ollama_base_url" not in st.session_state:
+        st.session_state.ollama_base_url = OLLAMA_DEFAULT_BASE_URL
 
     # Auto-load the active slot's FAISS index on startup / slot switch.
     active_path = slot_path(st.session_state.active_slot)
     if st.session_state.vectorstore is None and os.path.exists(active_path):
-        vs = load_vectorstore(active_path, api_key=get_api_key())
+        vs = load_vectorstore(
+            active_path,
+            api_key=get_api_key(),
+            provider=st.session_state.provider,
+            ollama_embedding_model=st.session_state.ollama_embedding_model,
+            ollama_base_url=st.session_state.ollama_base_url,
+        )
         if vs is not None:
             st.session_state.vectorstore = vs
 
@@ -678,9 +768,13 @@ def main() -> None:
 
     # Welcome screen when no index is loaded and conversation is empty
     if st.session_state.vectorstore is None and not st.session_state.chat_history:
+        if st.session_state.provider == PROVIDER_OLLAMA:
+            step1 = "Make sure your Ollama server is running (`ollama serve`)."
+        else:
+            step1 = "Enter your OpenAI API key in the sidebar."
         st.info(
             "**Get started in 3 steps:**\n\n"
-            "1. Enter your OpenAI API key in the sidebar.\n"
+            f"1. {step1}\n"
             "2. Upload one or more PDF files under **Your documents**.\n"
             "3. Click **Process** — then ask anything below!"
         )
@@ -702,27 +796,94 @@ def main() -> None:
 
     # --- Sidebar ---
     with st.sidebar:
-        st.text_input(
-            "OpenAI API Key",
-            type="password",
-            placeholder="sk-… (leave blank to use .env)",
-            key="api_key_input",
+        selected_provider = st.radio(
+            "Provider",
+            PROVIDERS,
+            index=PROVIDERS.index(st.session_state.provider),
+            horizontal=True,
+            help=(
+                "OpenAI: cloud-based models (API key required).  \n"
+                "Ollama: locally-running models (no API key needed, "
+                "Ollama must be running on your machine)."
+            ),
         )
-        if not get_api_key():
-            st.warning("No API key found. Enter one above or set OPENAI_API_KEY in your .env file.")
-
-        st.divider()
-        selected_model = st.selectbox(
-            "OpenAI model",
-            AVAILABLE_MODELS,
-            index=AVAILABLE_MODELS.index(st.session_state.model),
-        )
-        if selected_model != st.session_state.model:
-            st.session_state.model = selected_model
+        if selected_provider != st.session_state.provider:
+            st.session_state.provider = selected_provider
+            st.session_state.vectorstore = None
             st.session_state.chat_history = []
             st.session_state.sources = []
             st.session_state.suggested_questions = []
-            st.toast(f"Switched to {selected_model} — chat history cleared.", icon="ℹ️")
+            st.toast(f"Switched to {selected_provider} — index and history cleared.", icon="ℹ️")
+
+        st.divider()
+
+        if st.session_state.provider == PROVIDER_OPENAI:
+            st.text_input(
+                "OpenAI API Key",
+                type="password",
+                placeholder="sk-… (leave blank to use .env)",
+                key="api_key_input",
+            )
+            if not get_api_key():
+                st.warning(
+                    "No API key found. Enter one above or set OPENAI_API_KEY in your .env file."
+                )
+            selected_model = st.selectbox(
+                "OpenAI model",
+                AVAILABLE_MODELS,
+                index=AVAILABLE_MODELS.index(st.session_state.model),
+            )
+            if selected_model != st.session_state.model:
+                st.session_state.model = selected_model
+                st.session_state.chat_history = []
+                st.session_state.sources = []
+                st.session_state.suggested_questions = []
+                st.toast(f"Switched to {selected_model} — chat history cleared.", icon="ℹ️")
+        else:
+            st.caption(
+                "**Ollama** — models run locally. "
+                "Start the server with `ollama serve` and pull models with `ollama pull <model>`."
+            )
+            new_base_url = st.text_input(
+                "Ollama base URL",
+                value=st.session_state.ollama_base_url,
+                placeholder=OLLAMA_DEFAULT_BASE_URL,
+                help="URL of the Ollama server (default: http://localhost:11434).",
+            )
+            if new_base_url != st.session_state.ollama_base_url:
+                st.session_state.ollama_base_url = new_base_url
+            new_ollama_model = st.text_input(
+                "Chat model",
+                value=st.session_state.ollama_model,
+                placeholder="e.g. llama3.2, mistral, qwen2.5, gemma2",
+                help="Name of the Ollama model to use for chat (must be pulled first).",
+            )
+            if new_ollama_model and new_ollama_model != st.session_state.ollama_model:
+                st.session_state.ollama_model = new_ollama_model
+                st.session_state.chat_history = []
+                st.session_state.sources = []
+                st.session_state.suggested_questions = []
+                st.toast(f"Switched to {new_ollama_model} — chat history cleared.", icon="ℹ️")
+            new_embedding_model = st.text_input(
+                "Embedding model",
+                value=st.session_state.ollama_embedding_model,
+                placeholder="e.g. nomic-embed-text, mxbai-embed-large, all-minilm",
+                help=(
+                    "Ollama embedding model for building the vector index.  \n"
+                    "Changing this requires re-processing your documents."
+                ),
+            )
+            if (
+                new_embedding_model
+                and new_embedding_model != st.session_state.ollama_embedding_model
+            ):
+                st.session_state.ollama_embedding_model = new_embedding_model
+                st.session_state.vectorstore = None
+                st.toast(
+                    f"Embedding model changed to {new_embedding_model} — "
+                    "please re-process your documents.",
+                    icon="ℹ️",
+                )
 
         with st.expander("LLM & Retrieval", expanded=False):
             st.session_state.system_prompt = st.text_area(
@@ -940,10 +1101,16 @@ def main() -> None:
                         "Lower → more (smaller) chunks. Higher → fewer (larger) chunks."
                     ),
                 )
-                st.caption(
-                    ":warning: Semantic chunking calls the OpenAI Embeddings API "
-                    "for every document during processing."
-                )
+                if st.session_state.provider == PROVIDER_OPENAI:
+                    st.caption(
+                        ":warning: Semantic chunking calls the OpenAI Embeddings API "
+                        "for every document during processing."
+                    )
+                else:
+                    st.caption(
+                        ":warning: Semantic chunking calls the Ollama Embeddings API "
+                        "for every document during processing."
+                    )
 
         pdf_docs = st.file_uploader(
             "Upload your PDFs here and click on 'Process'",
@@ -953,7 +1120,7 @@ def main() -> None:
         if st.button("Process"):
             if not pdf_docs:
                 st.error("Please upload at least one PDF file before processing.")
-            elif not get_api_key():
+            elif st.session_state.provider == PROVIDER_OPENAI and not get_api_key():
                 st.error(
                     "No API key found. Enter your OpenAI API key in the sidebar "
                     "or set OPENAI_API_KEY in your .env file before processing."
@@ -987,13 +1154,21 @@ def main() -> None:
                                 chunk_overlap=st.session_state.chunk_overlap,
                                 semantic_threshold=st.session_state.semantic_threshold,
                                 api_key=get_api_key(),
+                                provider=st.session_state.provider,
+                                ollama_embedding_model=st.session_state.ollama_embedding_model,
+                                ollama_base_url=st.session_state.ollama_base_url,
                             )
 
                             # Step 3 — embedding + FAISS
                             st.write(f"Embedding {len(text_chunks)} chunks and building index…")
                             prog.progress(0.55)
                             vectorstore = get_vectorstore(
-                                text_chunks, metadatas, api_key=get_api_key()
+                                text_chunks,
+                                metadatas,
+                                api_key=get_api_key(),
+                                provider=st.session_state.provider,
+                                ollama_embedding_model=st.session_state.ollama_embedding_model,
+                                ollama_base_url=st.session_state.ollama_base_url,
                             )
 
                             # Step 4 — persist
@@ -1014,8 +1189,17 @@ def main() -> None:
 
                             # Generate suggested questions in the background step
                             st.write("Generating suggested questions…")
+                            active_model = (
+                                st.session_state.ollama_model
+                                if st.session_state.provider == PROVIDER_OLLAMA
+                                else st.session_state.model
+                            )
                             st.session_state.suggested_questions = generate_suggested_questions(
-                                text_chunks, api_key=get_api_key(), model=st.session_state.model
+                                text_chunks,
+                                api_key=get_api_key(),
+                                model=active_model,
+                                provider=st.session_state.provider,
+                                ollama_base_url=st.session_state.ollama_base_url,
                             )
                             proc_status.update(
                                 label=f"Done — {len(text_chunks)} chunks from "
