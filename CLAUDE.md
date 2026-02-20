@@ -49,7 +49,7 @@ PDF Upload → Text Extraction → Chunking → Embedding → Vector Store → C
 |---|---|---|
 | Text extraction | `get_pdf_text()` | `pypdf.PdfReader` iterates pages; per-file errors shown as `st.warning()` |
 | Chunking | `get_text_chunks()` | `CharacterTextSplitter` (size=1000, overlap=200) or `SemanticChunker` |
-| Embedding | `get_vectorstore()` | `OpenAIEmbeddings` (default) or `HuggingFaceInstructEmbeddings` |
+| Embedding | `get_vectorstore()` | `OpenAIEmbeddings` (default) or `OllamaEmbeddings` |
 | Vector store | `get_vectorstore()` | `FAISS.from_texts()` — saved to `faiss_indexes/{slot}/` |
 | Retrieval | `get_conversation_chain()` | Similarity or MMR retriever; optionally wrapped by `RerankingRetriever` |
 | Conversational chain | `get_conversation_chain()` | LCEL: `create_history_aware_retriever` + `create_retrieval_chain`; chat history passed explicitly |
@@ -98,7 +98,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`get_text_chunks(texts_with_meta, strategy, chunk_size, chunk_overlap, semantic_threshold, api_key)`** → `tuple[list[str], list[dict]]` — supports:
 - `CHUNK_STRATEGY_CHAR`: `CharacterTextSplitter(separator="\n", ...)`
-- `CHUNK_STRATEGY_SEMANTIC`: `SemanticChunker` from `langchain-experimental` (lazy import)
+- `CHUNK_STRATEGY_SEMANTIC`: `SemanticChunker` from `langchain-experimental`
 
 **`get_vectorstore(text_chunks, metadatas, api_key)`** → `FAISS`
 
@@ -112,7 +112,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 - No `memory` parameter — chat history passed explicitly via `chain.invoke({"input": ..., "chat_history": ...})`
 - Response keys: `response["answer"]` (str) and `response["context"]` (list[Document])
 
-**`RerankingRetriever(BaseRetriever)`** — Pydantic model wrapping a base retriever. Calls `base_retriever.invoke(query)`, scores pairs with `CrossEncoder`, returns top `k`. Falls back to original order on `ImportError` or any exception.
+**`RerankingRetriever(BaseRetriever)`** — Pydantic model wrapping a base retriever. Calls `base_retriever.invoke(query)`, scores pairs with `CrossEncoder`, returns top `k`. Falls back to original order on any exception.
 
 **`generate_suggested_questions(text_chunks, api_key, model)`** → `list[str]` — LLM call (temperature 0.3) on first 3000 chars of combined chunks; returns up to 5 questions.
 
@@ -221,19 +221,16 @@ make run   # or: streamlit run app.py
 | `langchain` | `>=0.3.0` | Base package; pulls in shared utilities |
 | `langchain-classic` | `>=1.0.0` | `create_history_aware_retriever`, `create_retrieval_chain`, `create_stuff_documents_chain` |
 | `langchain-openai` | `>=0.2.0` | OpenAI embeddings and chat models |
-| `langchain-community` | `>=0.3.0` | FAISS vector store, HuggingFace integrations |
+| `langchain-community` | `>=0.3.0` | FAISS vector store integrations |
 | `langchain-text-splitters` | `>=0.3.0` | `CharacterTextSplitter` |
+| `langchain-ollama` | `>=0.2.0` | Ollama chat and embedding models |
+| `langchain-experimental` | `>=0.3.0` | `SemanticChunker` for semantic chunking |
 | `pypdf` | `>=4.0.0` | PDF text extraction |
 | `python-dotenv` | `>=1.0.0` | `.env` file loading |
 | `streamlit` | `>=1.35.0` | Web UI framework |
 | `faiss-cpu` | `>=1.8.0` | In-memory vector similarity search |
+| `sentence-transformers` | `>=3.0.0` | Cross-encoder re-ranking |
 | `pytest` | `>=8.0.0` | Unit testing |
-
-**Optional (uncomment in `requirements.txt`)**:
-- `sentence-transformers>=3.0.0` — cross-encoder re-ranking + Instructor embeddings
-- `InstructorEmbedding>=1.0.1` — Instructor embedding model
-- `huggingface-hub>=0.20.0` — HuggingFace LLM backend
-- `langchain-experimental>=0.3.0` — `SemanticChunker` for semantic chunking
 
 ---
 
@@ -269,15 +266,17 @@ make format   # auto-fix formatting
 
 1. **Multiple index slots replace single index** — The old `faiss_index/` directory is no longer used. Indexes are stored under `faiss_indexes/{slot}/`. The default slot is `"default"`.
 
-2. **Re-ranking requires opt-in install** — Toggle "Cross-encoder re-ranking" in the sidebar, but first run `pip install sentence-transformers`. First use downloads ~50 MB model weights. Falls back gracefully when not installed.
+2. **Cross-encoder re-ranking downloads model weights on first use** — Toggling "Cross-encoder re-ranking" in the sidebar downloads ~50 MB of model weights the first time. Subsequent uses are cached for the lifetime of the server process via `@st.cache_resource`.
 
-3. **Semantic chunking requires opt-in install** — Uncomment `langchain-experimental` in `requirements.txt` and run `make install`.
+3. **Semantic chunking makes embedding API calls during processing** — The semantic chunking strategy calls the active embedding provider (OpenAI or Ollama) once per document page during the "Process" step.
 
-4. **History sent to the LLM is truncated, but the full log is kept in session state** — `_truncate_history()` caps the context at `MAX_HISTORY_TURNS` (20) pairs before each chain invocation, preventing token-limit errors. The full `st.session_state.chat_history` is still stored and displayed in the UI.
+4. **Ollama requires a running local server** — Select the Ollama provider only when `ollama serve` is running and the required models have been pulled (`ollama pull <model>`).
 
-5. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
+5. **History sent to the LLM is truncated, but the full log is kept in session state** — `_truncate_history()` caps the context at `MAX_HISTORY_TURNS` (20) pairs before each chain invocation, preventing token-limit errors. The full `st.session_state.chat_history` is still stored and displayed in the UI.
 
-6. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported. The chat UI uses native `st.chat_message()` bubbles.
+6. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
+
+7. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported. The chat UI uses native `st.chat_message()` bubbles.
 
 ---
 

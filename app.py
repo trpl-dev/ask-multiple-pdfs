@@ -17,14 +17,13 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
 from pydantic import ConfigDict
 from pypdf import PdfReader
-
-# Uncomment for HuggingFace alternatives:
-# from langchain_community.llms import HuggingFaceHub
-# from langchain_community.embeddings import HuggingFaceInstructEmbeddings
+from sentence_transformers import CrossEncoder
 
 FAISS_INDEXES_DIR = "faiss_indexes"
 DEFAULT_SLOT = "default"
@@ -275,13 +274,6 @@ def get_text_chunks(
         metadata (each dict carries "source" and "page" keys).
     """
     if strategy == CHUNK_STRATEGY_SEMANTIC:
-        try:
-            from langchain_experimental.text_splitter import SemanticChunker
-        except ImportError:
-            raise ImportError(
-                "Semantic chunking requires 'langchain-experimental'. "
-                "Uncomment it in requirements.txt and run `make install`."
-            )
         embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
         splitter = SemanticChunker(
             embeddings,
@@ -318,13 +310,6 @@ def _get_embeddings(
 ) -> Any:
     """Return the appropriate embeddings object for the given provider."""
     if provider == PROVIDER_OLLAMA:
-        try:
-            from langchain_ollama import OllamaEmbeddings  # noqa: PLC0415
-        except ImportError:
-            raise ImportError(
-                "Ollama support requires 'langchain-ollama'. "
-                "Uncomment it in requirements.txt and run `make install`."
-            )
         return OllamaEmbeddings(model=ollama_embedding_model, base_url=ollama_base_url)
     kwargs = {"api_key": api_key} if api_key else {}
     return OpenAIEmbeddings(**kwargs)
@@ -339,7 +324,6 @@ def get_vectorstore(
     ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
 ) -> FAISS:
     embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
-    # embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
     return FAISS.from_texts(texts=text_chunks, embedding=embeddings, metadatas=metadatas or [])
 
 
@@ -385,13 +369,6 @@ def get_conversation_chain(
     """
     callbacks = [stream_handler] if stream_handler else []
     if provider == PROVIDER_OLLAMA:
-        try:
-            from langchain_ollama import ChatOllama  # noqa: PLC0415
-        except ImportError:
-            raise ImportError(
-                "Ollama support requires 'langchain-ollama'. "
-                "Uncomment it in requirements.txt and run `make install`."
-            )
         answer_llm = ChatOllama(
             model=model,
             base_url=ollama_base_url,
@@ -473,15 +450,9 @@ def _load_cross_encoder(model_name: str) -> Any:
     """Load and cache a CrossEncoder model for the lifetime of the server process.
 
     The model weights (~50 MB) are downloaded once on first use and reused
-    across all Streamlit reruns and chat turns. Returns None if
-    sentence-transformers is not installed.
+    across all Streamlit reruns and chat turns.
     """
-    try:
-        from sentence_transformers import CrossEncoder  # noqa: PLC0415
-
-        return CrossEncoder(model_name)
-    except ImportError:
-        return None
+    return CrossEncoder(model_name)
 
 
 class RerankingRetriever(BaseRetriever):
@@ -508,8 +479,6 @@ class RerankingRetriever(BaseRetriever):
             return candidates[: self.top_k]
         try:
             encoder = _load_cross_encoder(self.model_name)
-            if encoder is None:
-                return candidates[: self.top_k]
             scores = encoder.predict([(query, d.page_content) for d in candidates])
             ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
             return [doc for _, doc in ranked[: self.top_k]]
@@ -545,10 +514,6 @@ def generate_suggested_questions(
     )
     try:
         if provider == PROVIDER_OLLAMA:
-            try:
-                from langchain_ollama import ChatOllama  # noqa: PLC0415
-            except ImportError:
-                return []
             llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0.3)
         else:
             kwargs = {"api_key": api_key} if api_key else {}
@@ -841,7 +806,7 @@ def main() -> None:
                 st.toast(f"Switched to {selected_model} — chat history cleared.", icon="ℹ️")
         else:
             st.caption(
-                "**Ollama** — models run locally. "
+                "**Ollama** — models run locally.  \n"
                 "Start the server with `ollama serve` and pull models with `ollama pull <model>`."
             )
             new_base_url = st.text_input(
@@ -927,7 +892,6 @@ def main() -> None:
                 value=st.session_state.reranker_enabled,
                 help=(
                     "Re-rank retrieved chunks with a cross-encoder before answering.  \n"
-                    "Requires `sentence-transformers` (`pip install sentence-transformers`).  \n"
                     "First use downloads ~50 MB model weights."
                 ),
             )

@@ -39,7 +39,7 @@ Two LLM providers are supported:
 | Conversation export | Download chat history as Markdown |
 | Session persistence | Save, load, and delete named chat sessions (JSON) |
 | Multiple index slots | Maintain independent FAISS indexes per project/topic |
-| Cross-encoder re-ranking | Opt-in reranking with `sentence-transformers` |
+| Cross-encoder re-ranking | Toggle reranking with a cross-encoder (downloads ~50 MB on first use) |
 | Docker support | One-command startup with `docker compose up` |
 
 ## Installation
@@ -92,10 +92,9 @@ make run   # or: streamlit run app.py
    ollama pull llama3.2
    ollama pull nomic-embed-text
    ```
-3. Uncomment `langchain-ollama>=0.2.0` in `requirements.txt` and run `make install`.
-4. Select **Ollama (local)** in the provider radio at the top of the sidebar.
-5. Set the base URL (default: `http://localhost:11434`), chat model, and embedding model.
-6. Upload PDFs and click **Process**.
+3. Select **Ollama (local)** in the provider radio at the top of the sidebar.
+4. Set the base URL (default: `http://localhost:11434`), chat model, and embedding model.
+5. Upload PDFs and click **Process**.
 
 > **Note:** The embedding model used when building the index must match the one used when loading it. If you change the embedding model, re-process your documents.
 
@@ -114,18 +113,6 @@ The active index slot is shown below the page header; switch slots any time from
 | **Index slots** | Create and switch between independent FAISS indexes |
 | **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |
 | **Your documents** | Index status indicator, PDF uploader, Process button, Clear saved index |
-
-## Optional Dependencies
-
-Uncomment the relevant lines in `requirements.txt` and run `make install`:
-
-| Package | Enables |
-|---|---|
-| `langchain-ollama>=0.2.0` | Ollama local model server support |
-| `sentence-transformers>=3.0.0` | Cross-encoder re-ranking + Instructor embeddings |
-| `InstructorEmbedding>=1.0.1` | HuggingFace Instructor embeddings |
-| `huggingface-hub>=0.20.0` | HuggingFace LLM backend |
-| `langchain-experimental>=0.3.0` | Semantic chunking strategy |
 
 ## Development
 
