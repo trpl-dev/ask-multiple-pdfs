@@ -7,6 +7,7 @@ from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.vectorstores import FAISS
@@ -48,10 +49,21 @@ OPENAI_COST_PER_1K: dict[str, tuple[float, float]] = {
 
 PROVIDER_OPENAI = "OpenAI"
 PROVIDER_OLLAMA = "Ollama (local)"
-PROVIDERS = [PROVIDER_OPENAI, PROVIDER_OLLAMA]
+PROVIDER_CLAUDE = "Claude (Anthropic)"
+PROVIDERS = [PROVIDER_OPENAI, PROVIDER_CLAUDE, PROVIDER_OLLAMA]
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "llama3.2"
 OLLAMA_DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+AVAILABLE_CLAUDE_MODELS = ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"]
+DEFAULT_CLAUDE_MODEL = AVAILABLE_CLAUDE_MODELS[0]
+
+# Approximate USD per 1 000 tokens (input / output) for Claude models.
+# Used only for display; actual billing may differ.
+CLAUDE_COST_PER_1K: dict[str, tuple[float, float]] = {
+    "claude-opus-4-5": (0.01500, 0.07500),
+    "claude-sonnet-4-5": (0.00300, 0.01500),
+    "claude-haiku-4-5": (0.00080, 0.00400),
+}
 
 # Only safe characters for user-supplied slot and session names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][\w\-. ]*$")
@@ -205,6 +217,18 @@ def get_api_key() -> str | None:
     return os.environ.get("OPENAI_API_KEY") or None
 
 
+def get_claude_api_key() -> str | None:
+    """Return the active Anthropic (Claude) API key.
+
+    Priority: key entered in the sidebar UI > ANTHROPIC_API_KEY env var.
+    Returns None if neither is set so callers can show a user-friendly warning.
+    """
+    ui_key = st.session_state.get("claude_api_key_input", "").strip()
+    if ui_key:
+        return ui_key
+    return os.environ.get("ANTHROPIC_API_KEY") or None
+
+
 # ---------------------------------------------------------------------------
 # Streaming callback — writes LLM tokens into a Streamlit placeholder
 # ---------------------------------------------------------------------------
@@ -319,6 +343,11 @@ def _get_embeddings(
     """Return the appropriate embeddings object for the given provider."""
     if provider == PROVIDER_OLLAMA:
         return OllamaEmbeddings(model=ollama_embedding_model, base_url=ollama_base_url)
+    if provider == PROVIDER_CLAUDE:
+        # Anthropic does not offer an embedding API; use a local sentence-transformers model.
+        from langchain_community.embeddings import HuggingFaceEmbeddings  # noqa: PLC0415
+
+        return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
     kwargs = {"api_key": api_key} if api_key else {}
     return OpenAIEmbeddings(**kwargs)
 
@@ -389,6 +418,16 @@ def get_conversation_chain(
             callbacks=callbacks,
         )
         condense_llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0)
+    elif provider == PROVIDER_CLAUDE:
+        claude_kwargs = {"api_key": api_key} if api_key else {}
+        answer_llm = ChatAnthropic(
+            model=model,
+            temperature=temperature,
+            streaming=True,
+            callbacks=callbacks,
+            **claude_kwargs,
+        )
+        condense_llm = ChatAnthropic(model=model, temperature=0, **claude_kwargs)
     else:
         kwargs = {"api_key": api_key} if api_key else {}
         answer_llm = ChatOpenAI(
@@ -762,22 +801,27 @@ def handle_userinput(user_question: str) -> None:
         stream_handler = StreamHandler(stream_container)
 
         try:
-            active_model = (
-                st.session_state.ollama_model
-                if st.session_state.provider == PROVIDER_OLLAMA
-                else st.session_state.model
-            )
+            provider = st.session_state.provider
+            if provider == PROVIDER_OLLAMA:
+                active_model = st.session_state.ollama_model
+                active_api_key = None
+            elif provider == PROVIDER_CLAUDE:
+                active_model = st.session_state.claude_model
+                active_api_key = get_claude_api_key()
+            else:
+                active_model = st.session_state.model
+                active_api_key = get_api_key()
             chain = get_conversation_chain(
                 st.session_state.vectorstore,
                 active_model,
                 stream_handler,
-                api_key=get_api_key(),
+                api_key=active_api_key,
                 temperature=st.session_state.temperature,
                 retrieval_k=st.session_state.retrieval_k,
                 retrieval_mode=st.session_state.retrieval_mode,
                 system_prompt=st.session_state.system_prompt,
                 reranker_enabled=st.session_state.reranker_enabled,
-                provider=st.session_state.provider,
+                provider=provider,
                 ollama_base_url=st.session_state.ollama_base_url,
                 doc_filter=st.session_state.doc_filter or None,
                 hybrid_enabled=st.session_state.hybrid_enabled,
@@ -792,7 +836,7 @@ def handle_userinput(user_question: str) -> None:
                 "input": user_question,
                 "chat_history": _truncate_history(st.session_state.chat_history, MAX_HISTORY_TURNS),
             }
-            if st.session_state.provider == PROVIDER_OPENAI:
+            if provider == PROVIDER_OPENAI:
                 from langchain_community.callbacks import get_openai_callback  # noqa: PLC0415
 
                 with get_openai_callback() as cb:
@@ -802,6 +846,22 @@ def handle_userinput(user_question: str) -> None:
                 tracker["prompt_tokens"] += cb.prompt_tokens
                 tracker["completion_tokens"] += cb.completion_tokens
                 tracker["total_cost"] += cb.total_cost
+            elif provider == PROVIDER_CLAUDE:
+                response = chain.invoke(payload)
+                # Estimate cost from CLAUDE_COST_PER_1K using token counts from response metadata.
+                tracker = st.session_state.cost_tracker
+                tracker["turns"] += 1
+                usage = response.get("answer_metadata", {}) if isinstance(response, dict) else {}
+                prompt_tokens = usage.get("input_tokens", 0)
+                completion_tokens = usage.get("output_tokens", 0)
+                tracker["prompt_tokens"] += prompt_tokens
+                tracker["completion_tokens"] += completion_tokens
+                in_cost, out_cost = CLAUDE_COST_PER_1K.get(
+                    st.session_state.claude_model, (0.0, 0.0)
+                )
+                tracker["total_cost"] += (prompt_tokens / 1000) * in_cost + (
+                    completion_tokens / 1000
+                ) * out_cost
             else:
                 response = chain.invoke(payload)
 
@@ -869,6 +929,8 @@ def main() -> None:
         st.session_state.ollama_embedding_model = OLLAMA_DEFAULT_EMBEDDING_MODEL
     if "ollama_base_url" not in st.session_state:
         st.session_state.ollama_base_url = OLLAMA_DEFAULT_BASE_URL
+    if "claude_model" not in st.session_state:
+        st.session_state.claude_model = DEFAULT_CLAUDE_MODEL
     # Hybrid search + per-document filter
     if "hybrid_enabled" not in st.session_state:
         st.session_state.hybrid_enabled = False
@@ -943,6 +1005,7 @@ def main() -> None:
             horizontal=True,
             help=(
                 "OpenAI: cloud-based models (API key required).  \n"
+                "Claude: Anthropic models (API key required).  \n"
                 "Ollama: locally-running models (no API key needed, "
                 "Ollama must be running on your machine)."
             ),
@@ -979,6 +1042,33 @@ def main() -> None:
                 st.session_state.sources = []
                 st.session_state.suggested_questions = []
                 st.toast(f"Switched to {selected_model} — chat history cleared.", icon="ℹ️")
+        elif st.session_state.provider == PROVIDER_CLAUDE:
+            st.text_input(
+                "Anthropic API Key",
+                type="password",
+                placeholder="sk-ant-… (leave blank to use .env)",
+                key="claude_api_key_input",
+            )
+            if not get_claude_api_key():
+                st.warning(
+                    "No API key found. Enter one above or set ANTHROPIC_API_KEY in your .env file."
+                )
+            selected_claude_model = st.selectbox(
+                "Claude model",
+                AVAILABLE_CLAUDE_MODELS,
+                index=AVAILABLE_CLAUDE_MODELS.index(st.session_state.claude_model),
+            )
+            if selected_claude_model != st.session_state.claude_model:
+                st.session_state.claude_model = selected_claude_model
+                st.session_state.chat_history = []
+                st.session_state.sources = []
+                st.session_state.suggested_questions = []
+                st.toast(
+                    f"Switched to {selected_claude_model} — chat history cleared.", icon="ℹ️"
+                )
+            st.caption(
+                "Embeddings use a local `all-MiniLM-L6-v2` model (no additional API key needed)."
+            )
         else:
             st.caption(
                 "**Ollama** — models run locally.  \n"
@@ -1093,8 +1183,8 @@ def main() -> None:
             elif st.session_state.indexed_files:
                 st.caption(f"Indexed: **{st.session_state.indexed_files[0]}**")
 
-        # Cost tracker (OpenAI only — Ollama is free / local)
-        if st.session_state.provider == PROVIDER_OPENAI:
+        # Cost tracker (OpenAI and Claude — Ollama is free / local)
+        if st.session_state.provider in (PROVIDER_OPENAI, PROVIDER_CLAUDE):
             tracker = st.session_state.cost_tracker
             if tracker["turns"] > 0:
                 with st.expander("Cost tracker", expanded=False):
@@ -1104,6 +1194,8 @@ def main() -> None:
                         f"Prompt tokens: {tracker['prompt_tokens']:,} · "
                         f"Completion tokens: {tracker['completion_tokens']:,}"
                     )
+                    if st.session_state.provider == PROVIDER_CLAUDE:
+                        st.caption("Cost is estimated from public pricing; actual billing may differ.")
                     if st.button("Reset cost tracker", use_container_width=True):
                         st.session_state.cost_tracker = {
                             "turns": 0,
