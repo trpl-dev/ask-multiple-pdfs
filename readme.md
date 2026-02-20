@@ -13,8 +13,9 @@ The MultiPDF Chat App lets you upload multiple PDF documents and ask natural lan
 1. **PDF Loading** — Upload one or more PDFs; text is extracted page by page.
 2. **Chunking** — Text is split into overlapping chunks (character-based or semantic).
 3. **Embedding** — Each chunk is embedded with OpenAI Embeddings and stored in a FAISS vector index.
-4. **Retrieval** — On each question, the most relevant chunks are retrieved (Similarity or MMR).
-5. **Answer Generation** — Retrieved chunks are passed to a ChatOpenAI model; the answer streams token-by-token into the chat bubble.
+4. **Question Condensing** — Chat history is used to rewrite follow-up questions as standalone queries, enabling accurate multi-turn conversations.
+5. **Retrieval** — The condensed question is matched against the FAISS index; the most relevant chunks are retrieved (Similarity or MMR, optionally re-ranked).
+6. **Answer Generation** — Retrieved chunks are passed to a ChatOpenAI model; the answer streams token-by-token into the chat bubble.
 
 ## Features
 
