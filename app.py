@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from typing import Any
@@ -34,6 +35,28 @@ CHUNK_STRATEGIES = [CHUNK_STRATEGY_CHAR, CHUNK_STRATEGY_SEMANTIC]
 RETRIEVAL_MODES = ["Similarity", "MMR"]
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_RETRIEVAL_K = 4
+MAX_HISTORY_TURNS = 20  # keep at most this many human/AI turn pairs in context
+
+# Only safe characters for user-supplied slot and session names.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][\w\-. ]*$")
+
+
+def _safe_name(name: str, label: str = "Name") -> str:
+    """Validate a user-supplied slot or session name against path traversal.
+
+    Only allows names that start with an alphanumeric character and contain
+    only letters, digits, hyphens, underscores, dots, or spaces.
+    Raises ValueError if the name is empty or contains unsafe characters.
+    """
+    name = name.strip()
+    if not name:
+        raise ValueError(f"{label} must not be empty.")
+    if not _SAFE_NAME_RE.match(name):
+        raise ValueError(
+            f"{label} '{name}' contains invalid characters. "
+            "Use only letters, digits, hyphens, underscores, spaces, or dots."
+        )
+    return name
 
 
 def slot_path(slot: str) -> str:
@@ -119,6 +142,7 @@ def list_sessions() -> list[str]:
 
 def save_session(name: str, chat_history: list[BaseMessage], sources: list[list[Document]]) -> None:
     """Persist the current conversation to sessions/<name>.json."""
+    name = _safe_name(name, "Session name")
     os.makedirs(SESSIONS_DIR, exist_ok=True)
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
     data = {
@@ -194,36 +218,38 @@ class StreamHandler(BaseCallbackHandler):
 # ---------------------------------------------------------------------------
 
 
-def get_pdf_text(pdf_docs: list[Any]) -> list[tuple[str, str]]:
-    """Extract text from each PDF; returns list of (text, filename) tuples."""
+def get_pdf_text(pdf_docs: list[Any]) -> list[tuple[str, str, int]]:
+    """Extract text from each PDF; returns list of (page_text, filename, page_number) tuples.
+
+    Each tuple represents one page so that chunk metadata can carry a page number.
+    Pages with no extractable text are silently skipped. Files that fail to open
+    emit an st.warning() and are excluded entirely.
+    """
     results = []
     for pdf in pdf_docs:
-        text = ""
         try:
             pdf_reader = PdfReader(pdf)
-            for page in pdf_reader.pages:
+            for page_num, page in enumerate(pdf_reader.pages, start=1):
                 page_text = page.extract_text()
-                if page_text:
-                    text += page_text
+                if page_text and page_text.strip():
+                    results.append((page_text, pdf.name, page_num))
         except Exception as e:
             st.warning(f"Could not read '{pdf.name}': {e}")
-        if text.strip():
-            results.append((text, pdf.name))
     return results
 
 
 def get_text_chunks(
-    texts_with_meta: list[tuple[str, str]],
+    texts_with_meta: list[tuple[str, str, int]],
     strategy: str = CHUNK_STRATEGY_CHAR,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     semantic_threshold: int = 95,
     api_key: str | None = None,
 ) -> tuple[list[str], list[dict]]:
-    """Split each document's text into chunks; returns (chunks, metadatas).
+    """Split each page's text into chunks; returns (chunks, metadatas).
 
     Args:
-        texts_with_meta: list of (text, filename) tuples from get_pdf_text()
+        texts_with_meta: list of (text, filename, page_number) tuples from get_pdf_text()
         strategy: CHUNK_STRATEGY_CHAR or CHUNK_STRATEGY_SEMANTIC
         chunk_size: Character strategy — target character count per chunk
         chunk_overlap: Character strategy — overlapping characters between chunks
@@ -233,7 +259,7 @@ def get_text_chunks(
 
     Returns:
         Tuple of (list[str], list[dict]) — the text chunks and their FAISS
-        metadata (each dict carries a "source" key with the originating filename).
+        metadata (each dict carries "source" and "page" keys).
     """
     if strategy == CHUNK_STRATEGY_SEMANTIC:
         try:
@@ -250,8 +276,8 @@ def get_text_chunks(
             breakpoint_threshold_amount=semantic_threshold,
         )
         all_docs = splitter.create_documents(
-            [text for text, _ in texts_with_meta],
-            metadatas=[{"source": name} for _, name in texts_with_meta],
+            [text for text, _, _ in texts_with_meta],
+            metadatas=[{"source": name, "page": page} for _, name, page in texts_with_meta],
         )
         return [d.page_content for d in all_docs], [d.metadata for d in all_docs]
 
@@ -264,10 +290,10 @@ def get_text_chunks(
     )
     all_chunks = []
     all_meta = []
-    for text, filename in texts_with_meta:
+    for text, filename, page_num in texts_with_meta:
         chunks = text_splitter.split_text(text)
         all_chunks.extend(chunks)
-        all_meta.extend([{"source": filename}] * len(chunks))
+        all_meta.extend([{"source": filename, "page": page_num}] * len(chunks))
     return all_chunks, all_meta
 
 
@@ -384,6 +410,22 @@ def get_conversation_chain(
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
+@st.cache_resource
+def _load_cross_encoder(model_name: str) -> Any:
+    """Load and cache a CrossEncoder model for the lifetime of the server process.
+
+    The model weights (~50 MB) are downloaded once on first use and reused
+    across all Streamlit reruns and chat turns. Returns None if
+    sentence-transformers is not installed.
+    """
+    try:
+        from sentence_transformers import CrossEncoder  # noqa: PLC0415
+
+        return CrossEncoder(model_name)
+    except ImportError:
+        return None
+
+
 class RerankingRetriever(BaseRetriever):
     """Wraps any retriever and re-ranks its candidates with a cross-encoder.
 
@@ -408,9 +450,9 @@ class RerankingRetriever(BaseRetriever):
         if len(candidates) <= 1:
             return candidates[: self.top_k]
         try:
-            from sentence_transformers import CrossEncoder  # noqa: PLC0415
-
-            encoder = CrossEncoder(self.model_name)
+            encoder = _load_cross_encoder(self.model_name)
+            if encoder is None:
+                return candidates[: self.top_k]
             scores = encoder.predict([(query, d.page_content) for d in candidates])
             ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
             return [doc for _, doc in ranked[: self.top_k]]
@@ -463,19 +505,21 @@ def _render_sources(sources: list[Document]) -> None:
         seen = set()
         for doc in sources:
             filename = doc.metadata.get("source", "unknown")
+            page = doc.metadata.get("page")
+            page_label = f" · p. {page}" if page else ""
             preview = doc.page_content[:250].replace("\n", " ").strip()
-            key = (filename, preview[:50])
+            key = (filename, page, preview[:50])
             if key in seen:
                 continue
             seen.add(key)
-            st.markdown(f"**{filename}**  \n{preview}…")
+            st.markdown(f"**{filename}**{page_label}  \n{preview}…")
 
 
 def format_conversation_as_markdown(
     chat_history: list[BaseMessage], sources: list[list[Document]]
 ) -> str:
     """Serialize the conversation to a Markdown string for download."""
-    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"# Chat Export — {date_str}", ""]
     bot_turn_idx = 0
     for i, message in enumerate(chat_history):
@@ -518,6 +562,19 @@ def render_chat_history() -> None:
                 bot_turn_idx += 1
 
 
+def _truncate_history(history: list[BaseMessage], max_turns: int) -> list[BaseMessage]:
+    """Return the last *max_turns* human/AI pairs from *history*.
+
+    Prevents unbounded context growth from crashing the LLM API call.
+    A "turn" is one human message + one AI message, so we keep at most
+    ``max_turns * 2`` messages.
+    """
+    max_messages = max_turns * 2
+    if len(history) > max_messages:
+        return history[-max_messages:]
+    return history
+
+
 def handle_userinput(user_question: str) -> None:
     if st.session_state.vectorstore is None:
         st.warning("Please upload and process your PDF documents first.")
@@ -545,7 +602,12 @@ def handle_userinput(user_question: str) -> None:
                 reranker_enabled=st.session_state.reranker_enabled,
             )
             response = chain.invoke(
-                {"input": user_question, "chat_history": st.session_state.chat_history}
+                {
+                    "input": user_question,
+                    "chat_history": _truncate_history(
+                        st.session_state.chat_history, MAX_HISTORY_TURNS
+                    ),
+                }
             )
             answer = response["answer"]
             new_sources = response.get("context", [])
@@ -725,12 +787,15 @@ def main() -> None:
             )
             if st.button("Save session", use_container_width=True, disabled=not new_name):
                 if st.session_state.chat_history:
-                    save_session(
-                        new_name.strip(),
-                        st.session_state.chat_history,
-                        st.session_state.sources,
-                    )
-                    st.success(f"Saved as '{new_name.strip()}'")
+                    try:
+                        save_session(
+                            new_name.strip(),
+                            st.session_state.chat_history,
+                            st.session_state.sources,
+                        )
+                        st.success(f"Saved as '{new_name.strip()}'")
+                    except ValueError as exc:
+                        st.error(str(exc))
                 else:
                     st.warning("Nothing to save — start a conversation first.")
 
@@ -776,8 +841,8 @@ def main() -> None:
             )
             cre_col, del_col = st.columns(2)
             if cre_col.button("Create", use_container_width=True, disabled=not new_slot_name):
-                name = new_slot_name.strip()
-                if name:
+                try:
+                    name = _safe_name(new_slot_name, "Slot name")
                     os.makedirs(slot_path(name), exist_ok=True)
                     st.session_state.active_slot = name
                     st.session_state.vectorstore = None
@@ -785,11 +850,18 @@ def main() -> None:
                     st.session_state.sources = []
                     st.session_state.suggested_questions = []
                     st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+            confirm_del_slot = del_col.checkbox(
+                "Confirm delete",
+                key="confirm_del_slot",
+                help="Tick to enable slot deletion.",
+            )
             if del_col.button(
                 "Delete slot",
                 use_container_width=True,
-                disabled=chosen_slot == DEFAULT_SLOT,
-                help="Cannot delete the default slot.",
+                disabled=chosen_slot == DEFAULT_SLOT or not confirm_del_slot,
+                help="Cannot delete the default slot. Tick 'Confirm delete' first.",
             ):
                 shutil.rmtree(slot_path(chosen_slot), ignore_errors=True)
                 st.session_state.active_slot = DEFAULT_SLOT
@@ -855,6 +927,11 @@ def main() -> None:
         if st.button("Process"):
             if not pdf_docs:
                 st.error("Please upload at least one PDF file before processing.")
+            elif not get_api_key():
+                st.error(
+                    "No API key found. Enter your OpenAI API key in the sidebar "
+                    "or set OPENAI_API_KEY in your .env file before processing."
+                )
             else:
                 try:
                     with st.status("Processing documents…", expanded=True) as proc_status:
@@ -932,7 +1009,16 @@ def main() -> None:
                     f"**Index loaded** · {meta['chunks']} chunks · {age_str}  \n"
                     + ", ".join(meta["files"])
                 )
-            if st.button("Clear saved index"):
+            confirm_clear = st.checkbox(
+                "Confirm clear",
+                key="confirm_clear_index",
+                help="Tick to enable index deletion.",
+            )
+            if st.button(
+                "Clear saved index",
+                disabled=not confirm_clear,
+                help="Permanently deletes the FAISS index for this slot. Tick 'Confirm clear' first.",
+            ):
                 shutil.rmtree(active_path)
                 st.session_state.vectorstore = None
                 st.session_state.chat_history = []
