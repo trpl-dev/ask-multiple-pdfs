@@ -1,4 +1,4 @@
-css = '''
+css = """
 <style>
 .chat-message {
     padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1rem; display: flex
@@ -23,7 +23,7 @@ css = '''
   padding: 0 1.5rem;
   color: #fff;
 }
-'''
+"""
 
 # Avatars are self-contained SVG data URIs — no external network requests.
 _BOT_AVATAR = (
