@@ -7,13 +7,14 @@ from typing import Any
 import streamlit as st
 from dotenv import load_dotenv
 from langchain.callbacks.base import BaseCallbackHandler
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.schema import AIMessage, BaseMessage, Document, HumanMessage
 from langchain_community.vectorstores import FAISS
 from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.retrievers import BaseRetriever
+from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import CharacterTextSplitter
 from pypdf import PdfReader
@@ -297,7 +298,6 @@ def load_vectorstore(index_path: str, api_key: str | None = None) -> FAISS | Non
 
 def get_conversation_chain(
     vectorstore: FAISS,
-    memory: ConversationBufferMemory,
     model: str = DEFAULT_MODEL,
     stream_handler: StreamHandler | None = None,
     api_key: str | None = None,
@@ -306,12 +306,15 @@ def get_conversation_chain(
     retrieval_mode: str = "Similarity",
     system_prompt: str = "",
     reranker_enabled: bool = False,
-) -> ConversationalRetrievalChain:
-    """Build a ConversationalRetrievalChain.
+) -> Runnable:
+    """Build an LCEL conversational RAG chain (LangChain 0.3+).
 
-    Uses a non-streaming LLM for question condensation and a streaming-enabled
-    LLM (with the given StreamHandler) for the final answer generation so that
-    only answer tokens appear in the UI placeholder.
+    Uses a non-streaming LLM for question condensation via
+    create_history_aware_retriever and a streaming-enabled LLM (with the
+    given StreamHandler) for final answer generation via
+    create_retrieval_chain so that only answer tokens appear in the UI.
+    Chat history is passed explicitly on each invocation — no memory object
+    is required.
     """
     kwargs = {"api_key": api_key} if api_key else {}
     callbacks = [stream_handler] if stream_handler else []
@@ -319,8 +322,8 @@ def get_conversation_chain(
         model=model, temperature=temperature, streaming=True, callbacks=callbacks, **kwargs
     )
     condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
-    # llm = HuggingFaceHub(repo_id="google/flan-t5-xxl", model_kwargs={"temperature": 0.5, "max_length": 512})
 
+    # --- Retriever (with optional re-ranking) ---
     fetch_k = max(retrieval_k * 4, 20)
     if retrieval_mode == "MMR":
         base_ret = vectorstore.as_retriever(
@@ -338,24 +341,40 @@ def get_conversation_chain(
         else base_ret
     )
 
-    prefix = f"{system_prompt.strip()}\n\n" if system_prompt.strip() else ""
-    qa_template = (
-        f"{prefix}"
-        "Use the following context to answer the question.\n\n"
-        "Context:\n{context}\n\n"
-        "Question: {question}\nHelpful Answer:"
+    # --- History-aware retriever: rewrites the question given chat history ---
+    contextualize_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "Given the chat history and the latest user question, which may reference "
+                "prior context, formulate a standalone question that can be understood "
+                "without the history. Do NOT answer it — only reformulate if needed, "
+                "otherwise return it as-is.",
+            ),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
     )
-    qa_prompt = PromptTemplate(input_variables=["context", "question"], template=qa_template)
+    history_aware_retriever = create_history_aware_retriever(
+        condense_llm, retriever, contextualize_prompt
+    )
 
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=answer_llm,
-        condense_question_llm=condense_llm,
-        retriever=retriever,
-        memory=memory,
-        return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": qa_prompt},
+    # --- QA chain: answer using retrieved context ---
+    prefix = f"{system_prompt.strip()}\n\n" if system_prompt.strip() else ""
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                f"{prefix}Use the following context to answer the question.\n\n"
+                "Context:\n{context}",
+            ),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
     )
-    return conversation_chain
+    question_answer_chain = create_stuff_documents_chain(answer_llm, qa_prompt)
+
+    return create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +404,7 @@ class RerankingRetriever(BaseRetriever):
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> list[Document]:
-        candidates = self.base_retriever.get_relevant_documents(query)
+        candidates = self.base_retriever.invoke(query)
         if len(candidates) <= 1:
             return candidates[: self.top_k]
         try:
@@ -516,7 +535,6 @@ def handle_userinput(user_question: str) -> None:
         try:
             chain = get_conversation_chain(
                 st.session_state.vectorstore,
-                st.session_state.memory,
                 st.session_state.model,
                 stream_handler,
                 api_key=get_api_key(),
@@ -526,9 +544,14 @@ def handle_userinput(user_question: str) -> None:
                 system_prompt=st.session_state.system_prompt,
                 reranker_enabled=st.session_state.reranker_enabled,
             )
-            response = chain.invoke({"question": user_question})
-            new_sources = response.get("source_documents", [])
-            st.session_state.chat_history = response["chat_history"]
+            response = chain.invoke(
+                {"input": user_question, "chat_history": st.session_state.chat_history}
+            )
+            answer = response["answer"]
+            new_sources = response.get("context", [])
+            # Append the new turn to the shared history list
+            st.session_state.chat_history.append(HumanMessage(content=user_question))
+            st.session_state.chat_history.append(AIMessage(content=answer))
             st.session_state.sources.append(new_sources)
         except Exception as e:
             stream_container.empty()
@@ -536,8 +559,7 @@ def handle_userinput(user_question: str) -> None:
             return
 
         # Replace streaming placeholder with final answer
-        bot_answer = st.session_state.chat_history[-1].content
-        stream_container.markdown(bot_answer)
+        stream_container.markdown(answer)
         _render_sources(new_sources)
 
 
@@ -553,8 +575,6 @@ def main() -> None:
     # --- Session state initialisation ---
     if "vectorstore" not in st.session_state:
         st.session_state.vectorstore = None
-    if "memory" not in st.session_state:
-        st.session_state.memory = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "sources" not in st.session_state:
@@ -590,9 +610,6 @@ def main() -> None:
         vs = load_vectorstore(active_path, api_key=get_api_key())
         if vs is not None:
             st.session_state.vectorstore = vs
-            st.session_state.memory = ConversationBufferMemory(
-                memory_key="chat_history", return_messages=True
-            )
 
     st.header("Chat with multiple PDFs :books:")
     render_chat_history()
@@ -628,7 +645,6 @@ def main() -> None:
         )
         if selected_model != st.session_state.model:
             st.session_state.model = selected_model
-            st.session_state.memory = None
             st.session_state.chat_history = []
             st.session_state.sources = []
             st.session_state.suggested_questions = []
@@ -697,9 +713,6 @@ def main() -> None:
                 st.session_state.chat_history = []
                 st.session_state.sources = []
                 st.session_state.suggested_questions = []
-                st.session_state.memory = ConversationBufferMemory(
-                    memory_key="chat_history", return_messages=True
-                )
                 st.rerun()
 
         st.divider()
@@ -730,15 +743,6 @@ def main() -> None:
                         st.session_state.chat_history = hist
                         st.session_state.sources = srcs
                         st.session_state.suggested_questions = []
-                        st.session_state.memory = ConversationBufferMemory(
-                            memory_key="chat_history", return_messages=True
-                        )
-                        # Replay history into memory so the chain has context
-                        for i in range(0, len(hist) - 1, 2):
-                            st.session_state.memory.save_context(
-                                {"input": hist[i].content},
-                                {"output": hist[i + 1].content if i + 1 < len(hist) else ""},
-                            )
                         st.rerun()
                     else:
                         st.error("Could not load session.")
@@ -762,7 +766,6 @@ def main() -> None:
             if chosen_slot != st.session_state.active_slot:
                 st.session_state.active_slot = chosen_slot
                 st.session_state.vectorstore = None
-                st.session_state.memory = None
                 st.session_state.chat_history = []
                 st.session_state.sources = []
                 st.session_state.suggested_questions = []
@@ -778,7 +781,6 @@ def main() -> None:
                     os.makedirs(slot_path(name), exist_ok=True)
                     st.session_state.active_slot = name
                     st.session_state.vectorstore = None
-                    st.session_state.memory = None
                     st.session_state.chat_history = []
                     st.session_state.sources = []
                     st.session_state.suggested_questions = []
@@ -792,7 +794,6 @@ def main() -> None:
                 shutil.rmtree(slot_path(chosen_slot), ignore_errors=True)
                 st.session_state.active_slot = DEFAULT_SLOT
                 st.session_state.vectorstore = None
-                st.session_state.memory = None
                 st.session_state.chat_history = []
                 st.session_state.sources = []
                 st.session_state.suggested_questions = []
@@ -903,9 +904,6 @@ def main() -> None:
                             prog.progress(1.0)
 
                             st.session_state.vectorstore = vectorstore
-                            st.session_state.memory = ConversationBufferMemory(
-                                memory_key="chat_history", return_messages=True
-                            )
                             st.session_state.chat_history = []
                             st.session_state.sources = []
 
@@ -937,7 +935,6 @@ def main() -> None:
             if st.button("Clear saved index"):
                 shutil.rmtree(active_path)
                 st.session_state.vectorstore = None
-                st.session_state.memory = None
                 st.session_state.chat_history = []
                 st.session_state.sources = []
                 st.session_state.suggested_questions = []

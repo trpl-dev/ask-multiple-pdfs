@@ -52,7 +52,7 @@ PDF Upload → Text Extraction → Chunking → Embedding → Vector Store → C
 | Embedding | `get_vectorstore()` | `OpenAIEmbeddings` (default) or `HuggingFaceInstructEmbeddings` |
 | Vector store | `get_vectorstore()` | `FAISS.from_texts()` — saved to `faiss_indexes/{slot}/` |
 | Retrieval | `get_conversation_chain()` | Similarity or MMR retriever; optionally wrapped by `RerankingRetriever` |
-| Conversational chain | `get_conversation_chain()` | `ConversationalRetrievalChain` + `ConversationBufferMemory` + custom `PromptTemplate` |
+| Conversational chain | `get_conversation_chain()` | LCEL: `create_history_aware_retriever` + `create_retrieval_chain`; chat history passed explicitly |
 | Streaming | `StreamHandler` | `BaseCallbackHandler` subclass; writes tokens into `st.empty()` placeholder |
 | UI rendering | `handle_userinput()`, `render_chat_history()`, `main()` | Native `st.chat_message()` / `st.chat_input()` |
 
@@ -104,13 +104,15 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`load_vectorstore(index_path, api_key)`** → `FAISS | None` — loads from `index_path`; shows `st.warning()` on failure.
 
-**`get_conversation_chain(vectorstore, memory, model, stream_handler, api_key, temperature, retrieval_k, retrieval_mode, system_prompt, reranker_enabled)`** → `ConversationalRetrievalChain`:
+**`get_conversation_chain(vectorstore, model, stream_handler, api_key, temperature, retrieval_k, retrieval_mode, system_prompt, reranker_enabled)`** → `Runnable`:
+- LCEL pipeline: `create_history_aware_retriever` (question condensing) → `create_stuff_documents_chain` (QA) → `create_retrieval_chain`
 - Separate non-streaming `condense_llm` and streaming `answer_llm`
-- Custom `PromptTemplate` with optional system prompt prefix
+- `ChatPromptTemplate` with `MessagesPlaceholder` for history; optional system prompt prefix
 - Retriever wrapping: `RerankingRetriever` when `reranker_enabled=True`, else plain FAISS retriever
-- `return_source_documents=True`
+- No `memory` parameter — chat history passed explicitly via `chain.invoke({"input": ..., "chat_history": ...})`
+- Response keys: `response["answer"]` (str) and `response["context"]` (list[Document])
 
-**`RerankingRetriever(BaseRetriever)`** — Pydantic model wrapping a base retriever. Calls `base_retriever.get_relevant_documents(query)`, scores pairs with `CrossEncoder`, returns top `k`. Falls back to original order on `ImportError` or any exception.
+**`RerankingRetriever(BaseRetriever)`** — Pydantic model wrapping a base retriever. Calls `base_retriever.invoke(query)`, scores pairs with `CrossEncoder`, returns top `k`. Falls back to original order on `ImportError` or any exception.
 
 **`generate_suggested_questions(text_chunks, api_key, model)`** → `list[str]` — LLM call (temperature 0.3) on first 3000 chars of combined chunks; returns up to 5 questions.
 
@@ -143,8 +145,7 @@ No longer imported by `app.py` (replaced by native `st.chat_message()` in Step 2
 | Key | Type | Description |
 |---|---|---|
 | `vectorstore` | `FAISS \| None` | Active vector store for the current slot |
-| `memory` | `ConversationBufferMemory \| None` | LangChain conversation memory |
-| `chat_history` | `list[BaseMessage]` | Alternating HumanMessage / AIMessage |
+| `chat_history` | `list[BaseMessage]` | Alternating HumanMessage / AIMessage; passed explicitly to each chain invocation |
 | `sources` | `list[list[Document]]` | Source docs per bot turn |
 | `model` | `str` | Selected OpenAI model name |
 | `temperature` | `float` | LLM temperature (0.0–1.0) |
@@ -216,10 +217,10 @@ make run   # or: streamlit run app.py
 
 | Package | Version Range | Purpose |
 |---|---|---|
-| `langchain` | `>=0.2.0,<0.3.0` | RAG chain, memory, prompts, base classes |
-| `langchain-openai` | `>=0.1.0` | OpenAI embeddings and chat models |
-| `langchain-community` | `>=0.2.0` | FAISS vector store, HuggingFace integrations |
-| `langchain-text-splitters` | `>=0.2.0` | `CharacterTextSplitter` |
+| `langchain` | `>=0.3.0` | LCEL chains, prompts, base classes |
+| `langchain-openai` | `>=0.2.0` | OpenAI embeddings and chat models |
+| `langchain-community` | `>=0.3.0` | FAISS vector store, HuggingFace integrations |
+| `langchain-text-splitters` | `>=0.3.0` | `CharacterTextSplitter` |
 | `pypdf` | `>=4.0.0` | PDF text extraction |
 | `python-dotenv` | `>=1.0.0` | `.env` file loading |
 | `streamlit` | `>=1.35.0` | Web UI framework |
@@ -270,13 +271,11 @@ make format   # auto-fix formatting
 
 3. **Semantic chunking requires opt-in install** — Uncomment `langchain-experimental` in `requirements.txt` and run `make install`.
 
-4. **No chunking of conversation history** — `ConversationBufferMemory` stores the full conversation. For very long sessions, token limits may eventually be exceeded.
+4. **No truncation of conversation history** — The full `chat_history` list is passed to every chain invocation. For very long sessions, token limits may eventually be exceeded.
 
 5. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
 
-6. **LangChain 0.2 boundary** — `requirements.txt` pins `langchain<0.3.0`. LangChain 0.3 dropped `ConversationalRetrievalChain` in favour of LCEL. Upgrading past 0.2 requires significant refactoring.
-
-7. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported. The chat UI uses native `st.chat_message()` bubbles.
+6. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported. The chat UI uses native `st.chat_message()` bubbles.
 
 ---
 
@@ -285,8 +284,9 @@ make format   # auto-fix formatting
 - **The entire application is in `app.py`.** `htmlTemplates.py` is no longer used.
 - **Session state is the persistence layer.** No database. Disk state: `faiss_indexes/{slot}/` (FAISS + metadata.json) and `sessions/*.json` (chat history).
 - **FAISS indexes are per-slot.** `active_path = slot_path(st.session_state.active_slot)` is computed once at the top of `main()` and reused throughout.
-- **Chain is rebuilt per invocation** — `get_conversation_chain()` is called inside `handle_userinput()` so a fresh `StreamHandler` can be injected. The `ConversationBufferMemory` is kept in session state across calls.
-- **Use `.invoke()` not dict-call.** LangChain 0.2+ deprecates calling the chain like `chain({"question": ...})`; use `chain.invoke({"question": ...})`.
+- **Chain is rebuilt per invocation** — `get_conversation_chain()` is called inside `handle_userinput()` so a fresh `StreamHandler` can be injected. No memory object is needed; history is passed explicitly.
+- **Chain invocation:** `chain.invoke({"input": user_question, "chat_history": st.session_state.chat_history})`. Response keys: `response["answer"]` (str) and `response["context"]` (list[Document]).
+- **History is managed manually** — after each turn, `HumanMessage` and `AIMessage` are appended to `st.session_state.chat_history`.
 - **Run `make lint` before committing** to ensure ruff passes cleanly.
 - **Do not pin dependencies to exact versions.** Use `>=x.y.z` style.
 - **`save_index_metadata` and `load_index_metadata` require `index_path`** — they no longer use a global constant. Pass the result of `slot_path(slot_name)`.
