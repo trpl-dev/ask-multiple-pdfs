@@ -19,7 +19,7 @@ Two LLM providers are supported:
 2. **Chunking** — Text is split into overlapping chunks (character-based or semantic).
 3. **Embedding** — Each chunk is embedded (OpenAI Embeddings or Ollama Embeddings) and stored in a FAISS vector index.
 4. **Question Condensing** — Chat history is used to rewrite follow-up questions as standalone queries, enabling accurate multi-turn conversations.
-5. **Retrieval** — The condensed question is matched against the FAISS index; the most relevant chunks are retrieved (Similarity or MMR, optionally re-ranked).
+5. **Retrieval** — The condensed question is matched against the index; the most relevant chunks are retrieved (Similarity, MMR, or Hybrid BM25 + Vector, optionally filtered by document and/or re-ranked).
 6. **Answer Generation** — Retrieved chunks are passed to the selected LLM (OpenAI or Ollama); the answer streams token-by-token into the chat bubble.
 
 ## Features
@@ -31,15 +31,18 @@ Two LLM providers are supported:
 | Source attribution | Expandable source snippets below each answer |
 | OpenAI models | Choose between `gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o` |
 | Ollama (local) | Use any locally-running Ollama model (e.g. `llama3.2`, `mistral`) |
+| **Hybrid search** | Fuse BM25 keyword search with FAISS vector search via Reciprocal Rank Fusion (RRF) for better recall on exact-term queries |
+| **Per-document filter** | Restrict retrieval to a selected subset of uploaded files; shown as a multiselect when the index contains more than one document |
+| **Cost tracker** | Tracks OpenAI token usage (prompt + completion) and estimated USD cost per session with a reset button |
 | System prompt | Optional instructions prepended to every QA prompt |
 | Temperature & k | Tune creativity and number of retrieved chunks |
 | Retrieval mode | Similarity or MMR (diversity-aware) |
+| Cross-encoder re-ranking | Opt-in reranking with `sentence-transformers` |
 | Chunking UI | Character splitter (configurable size/overlap) or Semantic splitter |
 | Suggested questions | LLM-generated one-click questions after processing |
 | Conversation export | Download chat history as Markdown |
 | Session persistence | Save, load, and delete named chat sessions (JSON) |
 | Multiple index slots | Maintain independent FAISS indexes per project/topic |
-| Cross-encoder re-ranking | Toggle reranking with a cross-encoder (downloads ~50 MB on first use) |
 | Docker support | One-command startup with `docker compose up` |
 
 ## Installation
@@ -101,6 +104,28 @@ make run   # or: streamlit run app.py
 Each answer streams in real time with a collapsible **Sources** expander below.
 The active index slot is shown below the page header; switch slots any time from the sidebar.
 
+### Hybrid Search
+
+Enable **Hybrid search (BM25 + Vector)** in the *LLM & Retrieval* sidebar expander.
+Both a BM25 keyword index and the FAISS vector index are queried independently; their ranked candidate lists are merged with [Reciprocal Rank Fusion (RRF)](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) so that documents ranking highly in either list surface at the top.
+This is particularly useful when queries contain domain-specific jargon or exact terms that pure vector search may miss.
+
+Requires `rank-bm25` (already in `requirements.txt`).
+
+### Per-Document Filtering
+
+When the active index contains **more than one file**, a **Filter by document** multiselect appears in the *LLM & Retrieval* expander.
+Select one or more files to restrict retrieval exclusively to chunks from those documents.
+Leave the multiselect empty to search across all indexed files (default).
+
+### Cost Tracker (OpenAI)
+
+A **Cost tracker** expander appears in the sidebar after the first answer is generated when using OpenAI.
+It displays the cumulative session cost in USD, the number of turns, and the prompt / completion token counts.
+Use the **Reset cost tracker** button to start a fresh count without clearing the conversation.
+
+> Costs are estimated using approximate OpenAI list prices (`gpt-4o-mini`: $0.15/$0.60 per 1 M tokens; `gpt-3.5-turbo`: $0.50/$1.50; `gpt-4o`: $2.50/$10.00). Actual billing may differ.
+
 ### Sidebar Options
 
 | Section | Options |
@@ -108,7 +133,8 @@ The active index slot is shown below the page header; switch slots any time from
 | **Provider** | Switch between OpenAI and Ollama (local); clears the index and history |
 | **OpenAI settings** | API key input, model selector (`gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o`) |
 | **Ollama settings** | Base URL, chat model name, embedding model name |
-| **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking |
+| **Cost tracker** | Session token counts and estimated USD cost (OpenAI only); reset button |
+| **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking, **Hybrid search**, **Filter by document** |
 | **Sessions** | Save/load/delete named chat sessions (delete requires confirmation) |
 | **Index slots** | Create and switch between independent FAISS indexes |
 | **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |

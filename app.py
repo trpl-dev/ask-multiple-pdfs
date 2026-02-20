@@ -38,6 +38,14 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_RETRIEVAL_K = 4
 MAX_HISTORY_TURNS = 20  # keep at most this many human/AI turn pairs in context
 
+# Cost tracker: approximate USD per 1 000 tokens (input / output) for OpenAI models.
+# Used only for display; actual billing may differ.
+OPENAI_COST_PER_1K: dict[str, tuple[float, float]] = {
+    "gpt-4o-mini": (0.00015, 0.00060),
+    "gpt-3.5-turbo": (0.00050, 0.00150),
+    "gpt-4o": (0.00250, 0.01000),
+}
+
 PROVIDER_OPENAI = "OpenAI"
 PROVIDER_OLLAMA = "Ollama (local)"
 PROVIDERS = [PROVIDER_OPENAI, PROVIDER_OLLAMA]
@@ -357,6 +365,10 @@ def get_conversation_chain(
     reranker_enabled: bool = False,
     provider: str = PROVIDER_OPENAI,
     ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
+    doc_filter: list[str] | None = None,
+    hybrid_enabled: bool = False,
+    text_chunks: list[str] | None = None,
+    chunk_metadatas: list[dict] | None = None,
 ) -> Runnable:
     """Build an LCEL conversational RAG chain (LangChain 0.3+).
 
@@ -384,16 +396,32 @@ def get_conversation_chain(
         )
         condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
 
-    # --- Retriever (with optional re-ranking) ---
+    # --- Retriever (with optional hybrid search, doc filter, and re-ranking) ---
     fetch_k = max(retrieval_k * 4, 20)
-    if retrieval_mode == "MMR":
+    # Downstream wrappers (filter / reranker) need extra candidates from the base retriever.
+    needs_extra = reranker_enabled or bool(doc_filter)
+
+    if hybrid_enabled and text_chunks:
+        base_ret: Any = HybridRetriever(
+            vectorstore=vectorstore,
+            corpus=text_chunks,
+            corpus_metadatas=chunk_metadatas or [],
+            top_k=fetch_k if needs_extra else retrieval_k,
+            retrieval_mode=retrieval_mode,
+        )
+    elif retrieval_mode == "MMR":
         base_ret = vectorstore.as_retriever(
             search_type="mmr",
-            search_kwargs={"k": fetch_k if reranker_enabled else retrieval_k, "fetch_k": fetch_k},
+            search_kwargs={"k": fetch_k if needs_extra else retrieval_k, "fetch_k": fetch_k},
         )
     else:
         base_ret = vectorstore.as_retriever(
-            search_kwargs={"k": fetch_k if reranker_enabled else retrieval_k}
+            search_kwargs={"k": fetch_k if needs_extra else retrieval_k}
+        )
+
+    if doc_filter:
+        base_ret = FilteredRetriever(
+            base_retriever=base_ret, allowed_sources=doc_filter, top_k=retrieval_k
         )
 
     retriever = (
@@ -484,6 +512,117 @@ class RerankingRetriever(BaseRetriever):
             return [doc for _, doc in ranked[: self.top_k]]
         except Exception:
             return candidates[: self.top_k]
+
+
+# ---------------------------------------------------------------------------
+# Hybrid retriever — BM25 keyword search fused with FAISS via RRF
+# ---------------------------------------------------------------------------
+
+
+@st.cache_resource
+def _build_bm25(corpus_key: int, corpus: tuple[str, ...]) -> Any:
+    """Build and cache a BM25Okapi index for the given text corpus.
+
+    The *corpus_key* argument is a cheap hash used as the cache key so that a
+    new index is built automatically whenever the processed documents change.
+    Returns None when rank-bm25 is not installed.
+    """
+    try:
+        from rank_bm25 import BM25Okapi  # noqa: PLC0415
+    except ImportError:
+        return None
+    tokenized = [doc.lower().split() for doc in corpus]
+    return BM25Okapi(tokenized)
+
+
+class HybridRetriever(BaseRetriever):
+    """Combines BM25 keyword search with FAISS vector search via Reciprocal Rank Fusion.
+
+    Both retrievers independently rank up to *fetch_k* candidate documents.
+    Their ranked lists are merged with the RRF formula
+    ``score = Σ 1 / (rrf_k + rank)`` so that a chunk ranking highly in either
+    list rises to the top even when it is absent from the other list.
+    Falls back to pure vector search when rank-bm25 is not installed.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    vectorstore: Any
+    corpus: list[str]
+    corpus_metadatas: list[dict]
+    top_k: int = DEFAULT_RETRIEVAL_K
+    rrf_k: int = 60  # standard RRF constant — dampens rank-1 dominance
+    retrieval_mode: str = "Similarity"
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        fetch_k = max(self.top_k * 4, 20)
+
+        # --- Vector branch ---
+        if self.retrieval_mode == "MMR":
+            vector_docs = self.vectorstore.max_marginal_relevance_search(
+                query, k=fetch_k, fetch_k=fetch_k * 2
+            )
+        else:
+            vector_docs = self.vectorstore.similarity_search(query, k=fetch_k)
+
+        # --- BM25 branch ---
+        bm25_docs: list[Document] = []
+        bm25_index = _build_bm25(id(self.corpus), tuple(self.corpus))
+        if bm25_index is not None:
+            scores = bm25_index.get_scores(query.lower().split())
+            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[
+                :fetch_k
+            ]
+            bm25_docs = [
+                Document(page_content=self.corpus[i], metadata=self.corpus_metadatas[i])
+                for i in top_indices
+            ]
+
+        # --- RRF fusion ---
+        rrf_scores: dict[str, float] = {}
+        doc_map: dict[str, Document] = {}
+
+        for rank, doc in enumerate(bm25_docs):
+            key = doc.page_content
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (self.rrf_k + rank + 1)
+            doc_map[key] = doc
+
+        for rank, doc in enumerate(vector_docs):
+            key = doc.page_content
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (self.rrf_k + rank + 1)
+            doc_map[key] = doc
+
+        ranked = sorted(rrf_scores, key=lambda k: rrf_scores[k], reverse=True)
+        return [doc_map[k] for k in ranked[: self.top_k]]
+
+
+# ---------------------------------------------------------------------------
+# Filtered retriever — restricts results to a chosen subset of source files
+# ---------------------------------------------------------------------------
+
+
+class FilteredRetriever(BaseRetriever):
+    """Post-filters any base retriever to only return chunks from allowed sources.
+
+    Fetches a larger candidate set from the wrapped retriever then applies the
+    source filter, ensuring the final list has up to *top_k* documents even
+    when many candidates come from excluded files.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    base_retriever: Any
+    allowed_sources: list[str]
+    top_k: int = DEFAULT_RETRIEVAL_K
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        candidates = self.base_retriever.invoke(query)
+        filtered = [d for d in candidates if d.metadata.get("source") in self.allowed_sources]
+        return filtered[: self.top_k]
 
 
 # ---------------------------------------------------------------------------
@@ -640,15 +779,32 @@ def handle_userinput(user_question: str) -> None:
                 reranker_enabled=st.session_state.reranker_enabled,
                 provider=st.session_state.provider,
                 ollama_base_url=st.session_state.ollama_base_url,
+                doc_filter=st.session_state.doc_filter or None,
+                hybrid_enabled=st.session_state.hybrid_enabled,
+                text_chunks=st.session_state.text_chunks
+                if st.session_state.hybrid_enabled
+                else None,
+                chunk_metadatas=st.session_state.chunk_metadatas
+                if st.session_state.hybrid_enabled
+                else None,
             )
-            response = chain.invoke(
-                {
-                    "input": user_question,
-                    "chat_history": _truncate_history(
-                        st.session_state.chat_history, MAX_HISTORY_TURNS
-                    ),
-                }
-            )
+            payload = {
+                "input": user_question,
+                "chat_history": _truncate_history(st.session_state.chat_history, MAX_HISTORY_TURNS),
+            }
+            if st.session_state.provider == PROVIDER_OPENAI:
+                from langchain_community.callbacks import get_openai_callback  # noqa: PLC0415
+
+                with get_openai_callback() as cb:
+                    response = chain.invoke(payload)
+                tracker = st.session_state.cost_tracker
+                tracker["turns"] += 1
+                tracker["prompt_tokens"] += cb.prompt_tokens
+                tracker["completion_tokens"] += cb.completion_tokens
+                tracker["total_cost"] += cb.total_cost
+            else:
+                response = chain.invoke(payload)
+
             answer = response["answer"]
             new_sources = response.get("context", [])
             # Append the new turn to the shared history list
@@ -713,6 +869,25 @@ def main() -> None:
         st.session_state.ollama_embedding_model = OLLAMA_DEFAULT_EMBEDDING_MODEL
     if "ollama_base_url" not in st.session_state:
         st.session_state.ollama_base_url = OLLAMA_DEFAULT_BASE_URL
+    # Hybrid search + per-document filter
+    if "hybrid_enabled" not in st.session_state:
+        st.session_state.hybrid_enabled = False
+    if "text_chunks" not in st.session_state:
+        st.session_state.text_chunks = []
+    if "chunk_metadatas" not in st.session_state:
+        st.session_state.chunk_metadatas = []
+    if "indexed_files" not in st.session_state:
+        st.session_state.indexed_files = []
+    if "doc_filter" not in st.session_state:
+        st.session_state.doc_filter = []
+    # Cost tracker (OpenAI only)
+    if "cost_tracker" not in st.session_state:
+        st.session_state.cost_tracker = {
+            "turns": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_cost": 0.0,
+        }
 
     # Auto-load the active slot's FAISS index on startup / slot switch.
     active_path = slot_path(st.session_state.active_slot)
@@ -895,6 +1070,48 @@ def main() -> None:
                     "First use downloads ~50 MB model weights."
                 ),
             )
+            st.session_state.hybrid_enabled = st.toggle(
+                "Hybrid search (BM25 + Vector)",
+                value=st.session_state.hybrid_enabled,
+                help=(
+                    "Fuse keyword-based BM25 search with FAISS vector search using  \n"
+                    "Reciprocal Rank Fusion (RRF).  \n"
+                    "Requires `rank-bm25` (`pip install rank-bm25`).  \n"
+                    "Improves recall for exact-term queries that pure vector search misses."
+                ),
+            )
+            if st.session_state.indexed_files and len(st.session_state.indexed_files) > 1:
+                st.session_state.doc_filter = st.multiselect(
+                    "Filter by document",
+                    options=st.session_state.indexed_files,
+                    default=st.session_state.doc_filter,
+                    help=(
+                        "Restrict retrieval to the selected files only.  \n"
+                        "Leave empty to search across all indexed documents."
+                    ),
+                )
+            elif st.session_state.indexed_files:
+                st.caption(f"Indexed: **{st.session_state.indexed_files[0]}**")
+
+        # Cost tracker (OpenAI only — Ollama is free / local)
+        if st.session_state.provider == PROVIDER_OPENAI:
+            tracker = st.session_state.cost_tracker
+            if tracker["turns"] > 0:
+                with st.expander("Cost tracker", expanded=False):
+                    st.metric("Session cost (USD)", f"${tracker['total_cost']:.4f}")
+                    st.caption(
+                        f"Turns: {tracker['turns']} · "
+                        f"Prompt tokens: {tracker['prompt_tokens']:,} · "
+                        f"Completion tokens: {tracker['completion_tokens']:,}"
+                    )
+                    if st.button("Reset cost tracker", use_container_width=True):
+                        st.session_state.cost_tracker = {
+                            "turns": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_cost": 0.0,
+                        }
+                        st.rerun()
 
         st.divider()
         if st.session_state.chat_history:
@@ -1148,6 +1365,12 @@ def main() -> None:
                             prog.progress(1.0)
 
                             st.session_state.vectorstore = vectorstore
+                            st.session_state.text_chunks = text_chunks
+                            st.session_state.chunk_metadatas = metadatas
+                            st.session_state.indexed_files = list(
+                                dict.fromkeys(t[1] for t in texts_with_meta)
+                            )
+                            st.session_state.doc_filter = []  # reset filter on new index
                             st.session_state.chat_history = []
                             st.session_state.sources = []
 
