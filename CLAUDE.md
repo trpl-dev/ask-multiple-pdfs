@@ -28,9 +28,10 @@ ask-multiple-pdfs/
 │   └── PDF-LangChain.jpg # Architecture diagram referenced in readme.md
 └── tests/
     ├── __init__.py
-    ├── test_chunking.py  # 7 tests for get_text_chunks()
+    ├── test_chunking.py  # 9 tests for get_text_chunks()
     ├── test_pdf.py       # 5 tests for get_pdf_text()
-    └── test_metadata.py  # 5 tests for save/load_index_metadata()
+    ├── test_metadata.py  # 5 tests for save/load_index_metadata()
+    └── test_sessions.py  # 18 tests for session persistence helpers
 ```
 
 Runtime directories (gitignored, created on first use):
@@ -51,16 +52,17 @@ PDF Upload → Text Extraction → Chunking → Embedding → Vector Store → C
 | Chunking | `get_text_chunks()` | `CharacterTextSplitter` (size=1000, overlap=200) or `SemanticChunker` |
 | Embedding | `get_vectorstore()` | `OpenAIEmbeddings` (default) or `OllamaEmbeddings` |
 | Vector store | `get_vectorstore()` | `FAISS.from_texts()` — saved to `faiss_indexes/{slot}/` |
-| Retrieval | `get_conversation_chain()` | Similarity or MMR retriever; optionally wrapped by `RerankingRetriever` |
+| Retrieval | `get_conversation_chain()` | Similarity, MMR, or Hybrid (BM25 + Vector via RRF); optionally wrapped by `FilteredRetriever` and/or `RerankingRetriever` |
 | Conversational chain | `get_conversation_chain()` | LCEL: `create_history_aware_retriever` + `create_retrieval_chain`; chat history passed explicitly |
 | Streaming | `StreamHandler` | `BaseCallbackHandler` subclass; writes tokens into `st.empty()` placeholder |
+| Cost tracking | `handle_userinput()` | `get_openai_callback()` context manager; accumulates tokens + cost in session state |
 | UI rendering | `handle_userinput()`, `render_chat_history()`, `main()` | Native `st.chat_message()` / `st.chat_input()` |
 
 ---
 
 ## Key Files
 
-### `app.py` (~620 lines)
+### `app.py` (~1 350 lines)
 
 The entire application. All functions have full type annotations (Python 3.11 native generics).
 
@@ -74,10 +76,11 @@ The entire application. All functions have full type annotations (Python 3.11 na
 | `AVAILABLE_MODELS` | `["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]` | Selectable OpenAI models |
 | `DEFAULT_MODEL` | `AVAILABLE_MODELS[0]` | |
 | `CHUNK_STRATEGY_CHAR/SEMANTIC` | string literals | Chunking strategy identifiers |
-| `RETRIEVAL_MODES` | `["Similarity", "MMR"]` | FAISS retrieval modes |
+| `RETRIEVAL_MODES` | `["Similarity", "MMR"]` | FAISS retrieval modes (Hybrid is a separate toggle) |
 | `DEFAULT_TEMPERATURE` | `0.0` | LLM temperature |
 | `DEFAULT_RETRIEVAL_K` | `4` | Default number of retrieved chunks |
 | `RERANKER_MODEL` | `"cross-encoder/ms-marco-MiniLM-L-6-v2"` | Cross-encoder model name |
+| `OPENAI_COST_PER_1K` | `dict[str, tuple[float, float]]` | Approximate input/output cost per 1 000 tokens per model (display only) |
 
 **Index slot helpers**
 - **`slot_path(slot)`** — returns `faiss_indexes/{slot}`
@@ -104,13 +107,22 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`load_vectorstore(index_path, api_key)`** → `FAISS | None` — loads from `index_path`; shows `st.warning()` on failure.
 
-**`get_conversation_chain(vectorstore, model, stream_handler, api_key, temperature, retrieval_k, retrieval_mode, system_prompt, reranker_enabled)`** → `Runnable`:
+**`get_conversation_chain(vectorstore, model, stream_handler, api_key, temperature, retrieval_k, retrieval_mode, system_prompt, reranker_enabled, provider, ollama_base_url, doc_filter, hybrid_enabled, text_chunks, chunk_metadatas)`** → `Runnable`:
 - LCEL pipeline: `create_history_aware_retriever` (question condensing) → `create_stuff_documents_chain` (QA) → `create_retrieval_chain`
 - Separate non-streaming `condense_llm` and streaming `answer_llm`
 - `ChatPromptTemplate` with `MessagesPlaceholder` for history; optional system prompt prefix
-- Retriever wrapping: `RerankingRetriever` when `reranker_enabled=True`, else plain FAISS retriever
+- Retriever build order: base retriever (Hybrid or FAISS) → optional `FilteredRetriever` → optional `RerankingRetriever`
+- `hybrid_enabled=True` builds a `HybridRetriever`; otherwise builds a plain FAISS retriever
+- `doc_filter` (non-empty list) wraps the base retriever with `FilteredRetriever`
+- `reranker_enabled=True` wraps with `RerankingRetriever`
 - No `memory` parameter — chat history passed explicitly via `chain.invoke({"input": ..., "chat_history": ...})`
 - Response keys: `response["answer"]` (str) and `response["context"]` (list[Document])
+
+**`_build_bm25(corpus_key, corpus)`** — `@st.cache_resource` helper that builds and caches a `BM25Okapi` index; returns `None` when `rank-bm25` is not installed.
+
+**`HybridRetriever(BaseRetriever)`** — combines BM25 and FAISS vector search using Reciprocal Rank Fusion (RRF, k=60). Fetches `max(top_k * 4, 20)` candidates from each branch; merges with `score = Σ 1/(rrf_k + rank)`. Falls back to pure vector search when `rank-bm25` is not installed.
+
+**`FilteredRetriever(BaseRetriever)`** — post-filters any wrapped retriever's results to only return `Document` objects whose `metadata["source"]` is in `allowed_sources`. Returns up to `top_k` matching documents.
 
 **`RerankingRetriever(BaseRetriever)`** — Pydantic model wrapping a base retriever. Calls `base_retriever.invoke(query)`, scores pairs with `CrossEncoder`, returns top `k`. Falls back to original order on any exception.
 
@@ -122,7 +134,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`render_chat_history()`** — replays all `st.session_state.chat_history` turns using `st.chat_message()`; shows sources below each assistant turn.
 
-**`handle_userinput(user_question)`** — guards against missing vectorstore; renders user bubble; streams answer into assistant bubble via fresh `StreamHandler`; appends sources to `st.session_state.sources`.
+**`handle_userinput(user_question)`** — guards against missing vectorstore; renders user bubble; streams answer into assistant bubble via fresh `StreamHandler`; appends sources to `st.session_state.sources`. When using OpenAI, wraps `chain.invoke()` with `get_openai_callback()` and accumulates token counts and cost into `st.session_state.cost_tracker`.
 
 **`main()`** — Streamlit entry point: `load_dotenv()`, session state init, auto-load of active slot's FAISS index, chat area (history + suggested questions + `st.chat_input()`), full sidebar.
 
@@ -154,12 +166,22 @@ No longer imported by `app.py` (replaced by native `st.chat_message()` in Step 2
 | `retrieval_mode` | `str` | `"Similarity"` or `"MMR"` |
 | `system_prompt` | `str` | Optional system-level instruction prefix |
 | `reranker_enabled` | `bool` | Toggle for cross-encoder re-ranking |
+| `hybrid_enabled` | `bool` | Toggle for hybrid BM25 + vector search |
+| `text_chunks` | `list[str]` | Raw text chunks stored after processing (used by `HybridRetriever`) |
+| `chunk_metadatas` | `list[dict]` | Metadata dicts parallel to `text_chunks` |
+| `indexed_files` | `list[str]` | Filenames present in the current index (used to populate the doc-filter multiselect) |
+| `doc_filter` | `list[str]` | Selected filenames to restrict retrieval to; empty = no filter |
+| `cost_tracker` | `dict` | Cumulative OpenAI cost: `turns`, `prompt_tokens`, `completion_tokens`, `total_cost` (float USD) |
 | `chunk_strategy` | `str` | `CHUNK_STRATEGY_CHAR` or `CHUNK_STRATEGY_SEMANTIC` |
 | `chunk_size` | `int` | Character splitter: chars per chunk |
 | `chunk_overlap` | `int` | Character splitter: overlapping chars |
 | `semantic_threshold` | `int` | Semantic splitter: breakpoint percentile (50–99) |
 | `suggested_questions` | `list[str]` | LLM-generated one-click questions |
 | `active_slot` | `str` | Active FAISS index slot name (default: `"default"`) |
+| `provider` | `str` | `PROVIDER_OPENAI` or `PROVIDER_OLLAMA` |
+| `ollama_model` | `str` | Ollama chat model name |
+| `ollama_embedding_model` | `str` | Ollama embedding model name |
+| `ollama_base_url` | `str` | Ollama server base URL |
 
 ---
 
@@ -221,7 +243,7 @@ make run   # or: streamlit run app.py
 | `langchain` | `>=0.3.0` | Base package; pulls in shared utilities |
 | `langchain-classic` | `>=1.0.0` | `create_history_aware_retriever`, `create_retrieval_chain`, `create_stuff_documents_chain` |
 | `langchain-openai` | `>=0.2.0` | OpenAI embeddings and chat models |
-| `langchain-community` | `>=0.3.0` | FAISS vector store integrations |
+| `langchain-community` | `>=0.3.0` | FAISS vector store, `get_openai_callback`, HuggingFace integrations |
 | `langchain-text-splitters` | `>=0.3.0` | `CharacterTextSplitter` |
 | `langchain-ollama` | `>=0.2.0` | Ollama chat and embedding models |
 | `langchain-experimental` | `>=0.3.0` | `SemanticChunker` for semantic chunking |
@@ -230,13 +252,15 @@ make run   # or: streamlit run app.py
 | `streamlit` | `>=1.35.0` | Web UI framework |
 | `faiss-cpu` | `>=1.8.0` | In-memory vector similarity search |
 | `sentence-transformers` | `>=3.0.0` | Cross-encoder re-ranking |
+| `rank-bm25` | `>=0.2.2` | BM25 keyword index for hybrid search |
 | `pytest` | `>=8.0.0` | Unit testing |
+
 
 ---
 
 ## Code Conventions
 
-- **Flat procedural structure** — No classes except `StreamHandler` and `RerankingRetriever`. All logic in `app.py`.
+- **Flat procedural structure** — Classes: `StreamHandler`, `RerankingRetriever`, `HybridRetriever`, `FilteredRetriever`. All other logic is in module-level functions in `app.py`.
 - **Full type annotations** — All functions and methods use Python 3.11 native generics (`list[str]`, `X | None`, etc.).
 - **Snake_case** — All functions and variables.
 - **Error handling** — `try/except` blocks surface errors as `st.error()` / `st.warning()` rather than crashing.
@@ -272,11 +296,19 @@ make format   # auto-fix formatting
 
 4. **Ollama requires a running local server** — Select the Ollama provider only when `ollama serve` is running and the required models have been pulled (`ollama pull <model>`).
 
-5. **History sent to the LLM is truncated, but the full log is kept in session state** — `_truncate_history()` caps the context at `MAX_HISTORY_TURNS` (20) pairs before each chain invocation, preventing token-limit errors. The full `st.session_state.chat_history` is still stored and displayed in the UI.
+5. **Hybrid search falls back to vector-only when rank-bm25 is missing** — `rank-bm25` is in `requirements.txt` by default. If removed, `HybridRetriever` silently falls back to pure FAISS similarity search.
 
-6. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
+6. **Per-document filter is only shown for multi-file indexes** — The "Filter by document" multiselect only appears when the active index contains more than one file. It resets to empty whenever new documents are processed.
 
-7. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported. The chat UI uses native `st.chat_message()` bubbles.
+7. **Cost tracker is OpenAI-only** — The tracker widget is hidden for Ollama sessions. It uses `get_openai_callback()` from `langchain_community`; actual billed amounts may differ from estimates.
+
+8. **`text_chunks` and `chunk_metadatas` are stored in session state** — They are needed by `HybridRetriever` at query time. They are populated during the Process step and cleared when a new index is loaded from disk (disk-loaded indexes do not persist chunk lists between server restarts; hybrid search is disabled automatically in that case because `text_chunks` is empty).
+
+9. **History sent to the LLM is truncated, but the full log is kept in session state** — `_truncate_history()` caps the context at `MAX_HISTORY_TURNS` (20) pairs before each chain invocation, preventing token-limit errors.
+
+10. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
+
+11. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported.
 
 ---
 
@@ -288,6 +320,9 @@ make format   # auto-fix formatting
 - **Chain is rebuilt per invocation** — `get_conversation_chain()` is called inside `handle_userinput()` so a fresh `StreamHandler` can be injected. No memory object is needed; history is passed explicitly.
 - **Chain invocation:** `chain.invoke({"input": user_question, "chat_history": st.session_state.chat_history})`. Response keys: `response["answer"]` (str) and `response["context"]` (list[Document]).
 - **History is managed manually** — after each turn, `HumanMessage` and `AIMessage` are appended to `st.session_state.chat_history`.
+- **Retriever build order:** base (HybridRetriever or FAISS) → FilteredRetriever (if `doc_filter`) → RerankingRetriever (if `reranker_enabled`).
+- **BM25 index is cached** via `@st.cache_resource` in `_build_bm25()`; the cache key is `id(corpus)` (changes when `st.session_state.text_chunks` is replaced after re-processing).
+- **Cost tracker dict keys:** `turns`, `prompt_tokens`, `completion_tokens`, `total_cost` (float). Updated in `handle_userinput()` inside a `get_openai_callback()` context only for the OpenAI provider.
 - **Run `make lint` before committing** to ensure ruff passes cleanly.
 - **Do not pin dependencies to exact versions.** Use `>=x.y.z` style.
 - **`save_index_metadata` and `load_index_metadata` require `index_path`** — they no longer use a global constant. Pass the result of `slot_path(slot_name)`.

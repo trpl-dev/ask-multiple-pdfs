@@ -11,6 +11,9 @@ streamlit>=1.35.0
 faiss-cpu>=1.8.0
 sentence-transformers>=3.0.0
 
+# hybrid BM25 + vector search (used by HybridRetriever)
+rank-bm25>=0.2.2
+
 # dev / testing
 pytest>=8.0.0
 pytest-cov>=5.0.0
