@@ -1,7 +1,8 @@
 """Tests for session persistence helpers in app.py."""
 
 import pytest
-from langchain.schema import AIMessage, Document, HumanMessage
+from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
 
 import app  # noqa: E402
 
