@@ -38,6 +38,7 @@ RETRIEVAL_MODES = ["Similarity", "MMR"]
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_RETRIEVAL_K = 4
 MAX_HISTORY_TURNS = 20  # keep at most this many human/AI turn pairs in context
+MAX_QUESTION_LENGTH = 5_000  # character cap for a single user question
 
 # Cost tracker: approximate USD per 1 000 tokens (input / output) for OpenAI models.
 # Used only for display; actual billing may differ.
@@ -185,6 +186,10 @@ def load_session(
     name: str,
 ) -> tuple[list[BaseMessage], list[list[Document]]] | tuple[None, None]:
     """Load a saved session; returns (chat_history, sources) or (None, None)."""
+    try:
+        name = _safe_name(name, "Session name")
+    except ValueError:
+        return None, None
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
     if not os.path.exists(path):
         return None, None
@@ -200,9 +205,20 @@ def load_session(
 
 def delete_session(name: str) -> None:
     """Delete a saved session file."""
+    try:
+        name = _safe_name(name, "Session name")
+    except ValueError:
+        return
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
     if os.path.exists(path):
         os.remove(path)
+
+
+def _clear_conversation() -> None:
+    """Reset conversation state: chat history, sources, and suggested questions."""
+    st.session_state.chat_history = []
+    st.session_state.sources = []
+    st.session_state.suggested_questions = []
 
 
 def get_api_key() -> str | None:
@@ -271,8 +287,11 @@ def get_pdf_text(pdf_docs: list[Any]) -> list[tuple[str, str, int]]:
                 page_text = page.extract_text()
                 if page_text and page_text.strip():
                     results.append((page_text, pdf.name, page_num))
-        except Exception as e:
-            st.warning(f"Could not read '{pdf.name}': {e}")
+        except Exception:
+            st.warning(
+                f"Could not read '{pdf.name}'. "
+                "The file may be corrupt, password-protected, or not a valid PDF."
+            )
     return results
 
 
@@ -376,9 +395,16 @@ def load_vectorstore(
         return None
     try:
         embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
+        # allow_dangerous_deserialization is required by FAISS.load_local() for pickle-based
+        # indexes. Indexes are written only by this app (vectorstore.save_local()); loading
+        # third-party index files from untrusted sources would be unsafe.
         return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-    except Exception as e:
-        st.warning(f"Could not load saved index: {e}")
+    except Exception:
+        st.warning(
+            "Could not load the saved index. "
+            "It may be corrupt or incompatible with the current embedding model. "
+            "Re-process your documents to rebuild it."
+        )
         return None
 
 
@@ -790,6 +816,12 @@ def handle_userinput(user_question: str) -> None:
     if st.session_state.vectorstore is None:
         st.warning("Please upload and process your PDF documents first.")
         return
+    if len(user_question) > MAX_QUESTION_LENGTH:
+        st.warning(
+            f"Your question is too long ({len(user_question):,} characters). "
+            f"Please limit it to {MAX_QUESTION_LENGTH:,} characters."
+        )
+        return
 
     # Show the new user message
     with st.chat_message("user"):
@@ -798,6 +830,8 @@ def handle_userinput(user_question: str) -> None:
     # Stream the bot response into a placeholder inside the chat bubble
     with st.chat_message("assistant"):
         stream_container = st.empty()
+        # Show a waiting indicator until the first token arrives
+        stream_container.markdown("*Thinking…*")
         stream_handler = StreamHandler(stream_container)
 
         try:
@@ -873,7 +907,31 @@ def handle_userinput(user_question: str) -> None:
             st.session_state.sources.append(new_sources)
         except Exception as e:
             stream_container.empty()
-            st.error(f"Error getting response: {e}")
+            err_lower = str(e).lower()
+            if any(k in err_lower for k in ("api key", "authentication", "unauthorized", "401")):
+                st.error(
+                    "Authentication failed. Check your API key in the sidebar or .env file."
+                )
+            elif any(k in err_lower for k in ("rate limit", "429", "quota")):
+                st.error(
+                    "Rate limit reached. Wait a moment before sending another message."
+                )
+            elif ("context" in err_lower and "length" in err_lower) or (
+                "maximum" in err_lower and "token" in err_lower
+            ):
+                st.error(
+                    "The conversation exceeded the model's context limit. "
+                    "Start a new conversation to continue."
+                )
+            elif any(k in err_lower for k in ("connection", "timeout", "network", "unreachable")):
+                st.error(
+                    "Connection error. Check your network connection and try again."
+                )
+            else:
+                st.error(
+                    "An error occurred while generating a response. "
+                    "Try again or check your settings."
+                )
             return
 
         # Replace streaming placeholder with final answer
@@ -1013,9 +1071,7 @@ def main() -> None:
         if selected_provider != st.session_state.provider:
             st.session_state.provider = selected_provider
             st.session_state.vectorstore = None
-            st.session_state.chat_history = []
-            st.session_state.sources = []
-            st.session_state.suggested_questions = []
+            _clear_conversation()
             st.toast(f"Switched to {selected_provider} — index and history cleared.", icon="ℹ️")
 
         st.divider()
@@ -1038,9 +1094,7 @@ def main() -> None:
             )
             if selected_model != st.session_state.model:
                 st.session_state.model = selected_model
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.toast(f"Switched to {selected_model} — chat history cleared.", icon="ℹ️")
         elif st.session_state.provider == PROVIDER_CLAUDE:
             st.text_input(
@@ -1060,9 +1114,7 @@ def main() -> None:
             )
             if selected_claude_model != st.session_state.claude_model:
                 st.session_state.claude_model = selected_claude_model
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.toast(
                     f"Switched to {selected_claude_model} — chat history cleared.", icon="ℹ️"
                 )
@@ -1090,9 +1142,7 @@ def main() -> None:
             )
             if new_ollama_model and new_ollama_model != st.session_state.ollama_model:
                 st.session_state.ollama_model = new_ollama_model
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.toast(f"Switched to {new_ollama_model} — chat history cleared.", icon="ℹ️")
             new_embedding_model = st.text_input(
                 "Embedding model",
@@ -1183,6 +1233,14 @@ def main() -> None:
             elif st.session_state.indexed_files:
                 st.caption(f"Indexed: **{st.session_state.indexed_files[0]}**")
 
+        # Context window indicator — warn when history truncation is active
+        total_turns = len(st.session_state.chat_history) // 2
+        if total_turns > MAX_HISTORY_TURNS:
+            st.caption(
+                f":warning: Context limited to the last {MAX_HISTORY_TURNS} of "
+                f"{total_turns} turns to stay within the model's context window."
+            )
+
         # Cost tracker (OpenAI and Claude — Ollama is free / local)
         if st.session_state.provider in (PROVIDER_OPENAI, PROVIDER_CLAUDE):
             tracker = st.session_state.cost_tracker
@@ -1219,9 +1277,7 @@ def main() -> None:
                 use_container_width=True,
             )
             if st.button("New conversation", use_container_width=True):
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.rerun()
 
         st.divider()
@@ -1287,9 +1343,7 @@ def main() -> None:
             if chosen_slot != st.session_state.active_slot:
                 st.session_state.active_slot = chosen_slot
                 st.session_state.vectorstore = None
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.rerun()
 
             new_slot_name = st.text_input(
@@ -1302,9 +1356,7 @@ def main() -> None:
                     os.makedirs(slot_path(name), exist_ok=True)
                     st.session_state.active_slot = name
                     st.session_state.vectorstore = None
-                    st.session_state.chat_history = []
-                    st.session_state.sources = []
-                    st.session_state.suggested_questions = []
+                    _clear_conversation()
                     st.rerun()
                 except ValueError as exc:
                     st.error(str(exc))
@@ -1322,9 +1374,7 @@ def main() -> None:
                 shutil.rmtree(slot_path(chosen_slot), ignore_errors=True)
                 st.session_state.active_slot = DEFAULT_SLOT
                 st.session_state.vectorstore = None
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.rerun()
 
         st.subheader("Your documents")
@@ -1517,9 +1567,7 @@ def main() -> None:
             ):
                 shutil.rmtree(active_path)
                 st.session_state.vectorstore = None
-                st.session_state.chat_history = []
-                st.session_state.sources = []
-                st.session_state.suggested_questions = []
+                _clear_conversation()
                 st.rerun()
 
 
