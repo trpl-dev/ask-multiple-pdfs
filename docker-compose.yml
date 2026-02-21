@@ -6,6 +6,7 @@ services:
     environment:
       # Pass your API keys from the host environment or a .env file
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - HUGGINGFACEHUB_API_TOKEN=${HUGGINGFACEHUB_API_TOKEN:-}
     volumes:
       # Persist the FAISS index and saved chat sessions across container restarts
