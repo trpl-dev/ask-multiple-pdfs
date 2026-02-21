@@ -771,6 +771,9 @@ def generate_suggested_questions(
     try:
         if provider == PROVIDER_OLLAMA:
             llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0.3)
+        elif provider == PROVIDER_CLAUDE:
+            claude_kwargs = {"api_key": api_key} if api_key else {}
+            llm = ChatAnthropic(model=model, temperature=0.3, **claude_kwargs)
         else:
             kwargs = {"api_key": api_key} if api_key else {}
             llm = ChatOpenAI(model=model, temperature=0.3, **kwargs)
@@ -1645,17 +1648,22 @@ def main() -> None:
                             st.session_state.doc_filter = []  # reset filter on new index
                             st.session_state.chat_history = []
                             st.session_state.sources = []
+                            st.session_state.feedback = []
 
                             # Generate suggested questions in the background step
                             st.write("Generating suggested questions…")
-                            active_model = (
-                                st.session_state.ollama_model
-                                if st.session_state.provider == PROVIDER_OLLAMA
-                                else st.session_state.model
-                            )
+                            if st.session_state.provider == PROVIDER_OLLAMA:
+                                active_model = st.session_state.ollama_model
+                                suggest_api_key = None
+                            elif st.session_state.provider == PROVIDER_CLAUDE:
+                                active_model = st.session_state.claude_model
+                                suggest_api_key = get_claude_api_key()
+                            else:
+                                active_model = st.session_state.model
+                                suggest_api_key = get_api_key()
                             st.session_state.suggested_questions = generate_suggested_questions(
                                 text_chunks,
-                                api_key=get_api_key(),
+                                api_key=suggest_api_key,
                                 model=active_model,
                                 provider=st.session_state.provider,
                                 ollama_base_url=st.session_state.ollama_base_url,
