@@ -80,6 +80,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 | `DEFAULT_TEMPERATURE` | `0.0` | LLM temperature |
 | `DEFAULT_RETRIEVAL_K` | `4` | Default number of retrieved chunks |
 | `RERANKER_MODEL` | `"cross-encoder/ms-marco-MiniLM-L-6-v2"` | Cross-encoder model name |
+| `MAX_QUESTION_LENGTH` | `5_000` | Character cap for a single user question; longer inputs are rejected with a warning |
 | `OPENAI_COST_PER_1K` | `dict[str, tuple[float, float]]` | Approximate input/output cost per 1 000 tokens per model (display only) |
 
 **Index slot helpers**
@@ -91,7 +92,9 @@ The entire application. All functions have full type annotations (Python 3.11 na
 **Session persistence helpers** (serialize/deserialize `BaseMessage` and `Document` objects to/from JSON)
 - `_serialize_messages()` / `_deserialize_messages()`
 - `_serialize_sources()` / `_deserialize_sources()`
-- **`list_sessions()`**, **`save_session()`**, **`load_session()`**, **`delete_session()`**
+- **`list_sessions()`**, **`save_session()`**, **`load_session()`**, **`delete_session()`** — `load_session()` and `delete_session()` validate the supplied name via `_safe_name()` to prevent path traversal; invalid names return `(None, None)` / no-op respectively
+
+**`_clear_conversation()`** — resets `chat_history`, `sources`, and `suggested_questions` in session state. Called in every code path that clears the conversation (provider switch, model switch, slot change, "New conversation", "Clear saved index").
 
 **`get_api_key()`** — UI input priority over `OPENAI_API_KEY` env var; returns `None` if neither set.
 
@@ -134,7 +137,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`render_chat_history()`** — replays all `st.session_state.chat_history` turns using `st.chat_message()`; shows sources below each assistant turn.
 
-**`handle_userinput(user_question)`** — guards against missing vectorstore; renders user bubble; streams answer into assistant bubble via fresh `StreamHandler`; appends sources to `st.session_state.sources`. When using OpenAI, wraps `chain.invoke()` with `get_openai_callback()` and accumulates token counts and cost into `st.session_state.cost_tracker`.
+**`handle_userinput(user_question)`** — guards against missing vectorstore and questions exceeding `MAX_QUESTION_LENGTH`; renders user bubble; shows a "Thinking…" placeholder while waiting for the first streaming token; streams answer into assistant bubble via fresh `StreamHandler`; appends sources to `st.session_state.sources`. Errors are classified (auth, rate-limit, context-length, network) into user-friendly messages rather than raw exceptions. When using OpenAI, wraps `chain.invoke()` with `get_openai_callback()` and accumulates token counts and cost into `st.session_state.cost_tracker`.
 
 **`main()`** — Streamlit entry point: `load_dotenv()`, session state init, auto-load of active slot's FAISS index, chat area (history + suggested questions + `st.chat_input()`), full sidebar.
 
