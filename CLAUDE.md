@@ -63,7 +63,7 @@ PDF Upload → Text Extraction → Chunking → Embedding → Vector Store → C
 
 ## Key Files
 
-### `app.py` (~1 350 lines)
+### `app.py` (~1 720 lines)
 
 The entire application. All functions have full type annotations (Python 3.11 native generics).
 
@@ -83,6 +83,12 @@ The entire application. All functions have full type annotations (Python 3.11 na
 | `RERANKER_MODEL` | `"cross-encoder/ms-marco-MiniLM-L-6-v2"` | Cross-encoder model name |
 | `MAX_QUESTION_LENGTH` | `5_000` | Character cap for a single user question; longer inputs are rejected with a warning |
 | `OPENAI_COST_PER_1K` | `dict[str, tuple[float, float]]` | Approximate input/output cost per 1 000 tokens per model (display only) |
+| `PROVIDER_OPENAI/CLAUDE/OLLAMA` | string literals | Provider identifier constants |
+| `PROVIDERS` | `[PROVIDER_OPENAI, PROVIDER_CLAUDE, PROVIDER_OLLAMA]` | Ordered list of selectable providers |
+| `AVAILABLE_CLAUDE_MODELS` | `["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-6"]` | Selectable Claude models |
+| `DEFAULT_CLAUDE_MODEL` | `AVAILABLE_CLAUDE_MODELS[0]` | |
+| `CLAUDE_COST_PER_1K` | `dict[str, tuple[float, float]]` | Approximate input/output cost per 1 000 tokens for Claude models (display only) |
+| `MAX_HISTORY_TURNS` | `20` | Maximum human/AI turn pairs sent to the LLM in context |
 
 **Index slot helpers**
 - **`slot_path(slot)`** — returns `faiss_indexes/{slot}`
@@ -182,7 +188,8 @@ The entire application. All functions have full type annotations (Python 3.11 na
 | `semantic_threshold` | `int` | Semantic splitter: breakpoint percentile (50–99) |
 | `suggested_questions` | `list[str]` | LLM-generated one-click questions |
 | `active_slot` | `str` | Active FAISS index slot name (default: `"default"`) |
-| `provider` | `str` | `PROVIDER_OPENAI` or `PROVIDER_OLLAMA` |
+| `provider` | `str` | `PROVIDER_OPENAI`, `PROVIDER_CLAUDE`, or `PROVIDER_OLLAMA` |
+| `claude_model` | `str` | Selected Claude model name |
 | `ollama_model` | `str` | Ollama chat model name |
 | `ollama_embedding_model` | `str` | Ollama embedding model name |
 | `ollama_base_url` | `str` | Ollama server base URL |
@@ -333,4 +340,4 @@ make format   # auto-fix formatting
 - **Run `make lint` before committing** to ensure ruff passes cleanly.
 - **Do not pin dependencies to exact versions.** Use `>=x.y.z` style.
 - **`save_index_metadata` and `load_index_metadata` require `index_path`** — they no longer use a global constant. Pass the result of `slot_path(slot_name)`.
-- **API keys are required.** The app will fail immediately without a valid `OPENAI_API_KEY` set in `.env` or the sidebar.
+- **API keys are required.** The app will fail immediately without a valid `OPENAI_API_KEY` (for OpenAI) or `ANTHROPIC_API_KEY` (for Claude) set in `.env` or the sidebar. Ollama requires no API key.
