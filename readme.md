@@ -6,9 +6,10 @@
 
 The MultiPDF Chat App lets you upload multiple PDF documents and ask natural language questions about their content via a conversational chat interface. It is built on a Retrieval-Augmented Generation (RAG) pipeline using LangChain, FAISS, and Streamlit.
 
-Two LLM providers are supported:
+Three LLM providers are supported:
 
-- **OpenAI** (default) — cloud-based models; requires an API key.
+- **OpenAI** (default) — cloud-based models; requires an OpenAI API key.
+- **Claude (Anthropic)** — Claude models; requires an Anthropic API key. Embeddings are generated locally with `all-MiniLM-L6-v2` (no second API key needed).
 - **Ollama** — locally-running open-source models; no API key needed, requires [Ollama](https://ollama.com) installed on your machine.
 
 ## How It Works
@@ -17,10 +18,10 @@ Two LLM providers are supported:
 
 1. **PDF Loading** — Upload one or more PDFs; text is extracted page by page.
 2. **Chunking** — Text is split into overlapping chunks (character-based or semantic).
-3. **Embedding** — Each chunk is embedded (OpenAI Embeddings or Ollama Embeddings) and stored in a FAISS vector index.
+3. **Embedding** — Each chunk is embedded (OpenAI Embeddings, local `all-MiniLM-L6-v2` for Claude, or Ollama Embeddings) and stored in a FAISS vector index.
 4. **Question Condensing** — Chat history is used to rewrite follow-up questions as standalone queries, enabling accurate multi-turn conversations.
 5. **Retrieval** — The condensed question is matched against the index; the most relevant chunks are retrieved (Similarity, MMR, or Hybrid BM25 + Vector, optionally filtered by document and/or re-ranked).
-6. **Answer Generation** — Retrieved chunks are passed to the selected LLM (OpenAI or Ollama); the answer streams token-by-token into the chat bubble.
+6. **Answer Generation** — Retrieved chunks are passed to the selected LLM (OpenAI, Claude, or Ollama); the answer streams token-by-token into the chat bubble.
 
 ## Features
 
@@ -30,10 +31,11 @@ Two LLM providers are supported:
 | Streaming answers | Token-level streaming with a live cursor |
 | Source attribution | Expandable source snippets below each answer |
 | OpenAI models | Choose between `gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o` |
+| Claude models | Choose between `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`; embeddings use a local model |
 | Ollama (local) | Use any locally-running Ollama model (e.g. `llama3.2`, `mistral`) |
 | **Hybrid search** | Fuse BM25 keyword search with FAISS vector search via Reciprocal Rank Fusion (RRF) for better recall on exact-term queries |
 | **Per-document filter** | Restrict retrieval to a selected subset of uploaded files; shown as a multiselect when the index contains more than one document |
-| **Cost tracker** | Tracks OpenAI token usage (prompt + completion) and estimated USD cost per session with a reset button |
+| **Cost tracker** | Tracks token usage (prompt + completion) and estimated USD cost per session for OpenAI and Claude; reset button included |
 | System prompt | Optional instructions prepended to every QA prompt |
 | Temperature & k | Tune creativity and number of retrieved chunks |
 | Retrieval mode | Similarity or MMR (diversity-aware) |
@@ -59,14 +61,15 @@ source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt   # or: make install
 
 cp .env.example .env
-# Edit .env and set OPENAI_API_KEY=<your-key>  (only needed for OpenAI provider)
+# Edit .env — set OPENAI_API_KEY for OpenAI, ANTHROPIC_API_KEY for Claude
+# (only the key for your chosen provider is required)
 ```
 
 ### Docker
 
 ```bash
 cp .env.example .env
-# Edit .env and set OPENAI_API_KEY=<your-key>  (only needed for OpenAI provider)
+# Edit .env — set OPENAI_API_KEY for OpenAI, ANTHROPIC_API_KEY for Claude
 
 make docker-up   # or: docker compose up --build -d
 ```
@@ -86,6 +89,16 @@ make run   # or: streamlit run app.py
 2. Enter your OpenAI API key in the sidebar (or set `OPENAI_API_KEY` in `.env`).
 3. Upload one or more PDF files under **Your documents** and click **Process**.
 4. Ask questions in the chat input.
+
+### Using Claude (Anthropic)
+
+1. Select **Claude (Anthropic)** in the provider radio at the top of the sidebar.
+2. Enter your Anthropic API key in the sidebar (or set `ANTHROPIC_API_KEY` in `.env`).
+3. Choose a model from the dropdown (`claude-opus-4-5`, `claude-sonnet-4-5`, or `claude-haiku-4-5`).
+4. Upload one or more PDF files under **Your documents** and click **Process**.
+5. Ask questions in the chat input.
+
+> **Embeddings:** The Claude provider uses a local `all-MiniLM-L6-v2` model for embeddings (via `sentence-transformers`), so no second API key is required.
 
 ### Using Ollama (local)
 
@@ -118,22 +131,25 @@ When the active index contains **more than one file**, a **Filter by document** 
 Select one or more files to restrict retrieval exclusively to chunks from those documents.
 Leave the multiselect empty to search across all indexed files (default).
 
-### Cost Tracker (OpenAI)
+### Cost Tracker (OpenAI and Claude)
 
-A **Cost tracker** expander appears in the sidebar after the first answer is generated when using OpenAI.
+A **Cost tracker** expander appears in the sidebar after the first answer is generated when using OpenAI or Claude.
 It displays the cumulative session cost in USD, the number of turns, and the prompt / completion token counts.
 Use the **Reset cost tracker** button to start a fresh count without clearing the conversation.
 
-> Costs are estimated using approximate OpenAI list prices (`gpt-4o-mini`: $0.15/$0.60 per 1 M tokens; `gpt-3.5-turbo`: $0.50/$1.50; `gpt-4o`: $2.50/$10.00). Actual billing may differ.
+> **OpenAI** costs are tracked via `get_openai_callback()` (LangChain Community). Approximate list prices: `gpt-4o-mini` $0.15/$0.60, `gpt-3.5-turbo` $0.50/$1.50, `gpt-4o` $2.50/$10.00 per 1 M tokens.
+>
+> **Claude** costs are estimated from public Anthropic pricing: `claude-opus-4-5` $15.00/$75.00, `claude-sonnet-4-5` $3.00/$15.00, `claude-haiku-4-5` $0.80/$4.00 per 1 M tokens. Actual billing may differ.
 
 ### Sidebar Options
 
 | Section | Options |
 |---|---|
-| **Provider** | Switch between OpenAI and Ollama (local); clears the index and history |
+| **Provider** | Switch between OpenAI, Claude (Anthropic), and Ollama (local); clears the index and history |
 | **OpenAI settings** | API key input, model selector (`gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o`) |
+| **Claude settings** | Anthropic API key input, model selector (`claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`) |
 | **Ollama settings** | Base URL, chat model name, embedding model name |
-| **Cost tracker** | Session token counts and estimated USD cost (OpenAI only); reset button |
+| **Cost tracker** | Session token counts and estimated USD cost (OpenAI and Claude); reset button |
 | **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking, **Hybrid search**, **Filter by document** |
 | **Sessions** | Save/load/delete named chat sessions (delete requires confirmation) |
 | **Index slots** | Create and switch between independent FAISS indexes |
