@@ -1,4 +1,6 @@
 import concurrent.futures
+import hashlib
+import hmac as _hmac_module
 import json
 import logging
 import os
@@ -113,13 +115,86 @@ def list_index_slots() -> list[str]:
     return sorted(d for d in os.listdir(FAISS_INDEXES_DIR) if os.path.isdir(slot_path(d)))
 
 
+# ---------------------------------------------------------------------------
+# FAISS index integrity helpers (HMAC-SHA256)
+# ---------------------------------------------------------------------------
+
+# Names of the two artifact files written by FAISS.save_local().
+_FAISS_ARTIFACT_NAMES: list[str] = ["index.faiss", "index.pkl"]
+
+
+def _get_hmac_secret() -> bytes | None:
+    """Return the HMAC secret from the FAISS_HMAC_SECRET env var, or None if unset."""
+    raw = os.environ.get("FAISS_HMAC_SECRET", "").strip()
+    return raw.encode() if raw else None
+
+
+def _compute_index_hmac(index_path: str) -> str | None:
+    """Compute an HMAC-SHA256 digest over the FAISS artifact files in *index_path*.
+
+    Returns the hex digest string when both the secret env var and all artifact
+    files are present; returns None otherwise.
+
+    The digest covers ``index.faiss`` and ``index.pkl`` in deterministic
+    (sorted) filename order so that the value is stable regardless of
+    filesystem enumeration order.
+    """
+    secret = _get_hmac_secret()
+    if not secret:
+        return None
+
+    h = _hmac_module.new(secret, digestmod=hashlib.sha256)
+    for name in sorted(_FAISS_ARTIFACT_NAMES):
+        artifact = os.path.join(index_path, name)
+        if not os.path.isfile(artifact):
+            logger.warning("HMAC computation skipped: artifact '%s' not found", artifact)
+            return None
+        with open(artifact, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
+
+
+def _assert_within_base_dir(path: str, base_dir: str) -> None:
+    """Raise ValueError if *path* is not contained within *base_dir*.
+
+    Uses ``os.path.realpath`` to resolve symlinks so that traversal
+    attacks using ``../`` segments or symlinks are caught.
+    """
+    real_path = os.path.realpath(path)
+    real_base = os.path.realpath(base_dir)
+    if not real_path.startswith(real_base + os.sep) and real_path != real_base:
+        raise ValueError(
+            f"Path '{path}' resolves outside the expected base directory '{base_dir}'."
+        )
+
+
 def save_index_metadata(filenames: list[str], chunk_count: int, index_path: str) -> None:
-    """Persist index provenance to metadata.json inside the given index directory."""
-    meta = {
+    """Persist index provenance (and optional HMAC) to metadata.json.
+
+    When the ``FAISS_HMAC_SECRET`` environment variable is set an
+    HMAC-SHA256 digest of the FAISS artifact files is computed and stored
+    in the ``"hmac"`` field.  ``load_vectorstore()`` will verify this digest
+    before deserialising the index, preventing tampered indexes from being
+    loaded.
+
+    The FAISS artifacts (``index.faiss`` / ``index.pkl``) must already
+    exist on disk when this function is called — i.e. call
+    ``vectorstore.save_local(index_path)`` first.
+    """
+    meta: dict = {
         "files": filenames,
         "chunks": chunk_count,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    hmac_val = _compute_index_hmac(index_path)
+    if hmac_val is not None:
+        meta["hmac"] = hmac_val
+    elif _get_hmac_secret() is not None:
+        # Secret is configured but HMAC could not be computed (missing files).
+        logger.warning(
+            "FAISS_HMAC_SECRET is set but HMAC could not be computed for '%s'.", index_path
+        )
+
     meta_path = os.path.join(index_path, "metadata.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f)
@@ -169,7 +244,10 @@ def _serialize_sources(sources: list[list[Document]]) -> list[list[dict]]:
 
 def _deserialize_sources(raw: list[list[dict]]) -> list[list[Document]]:
     return [
-        [Document(page_content=s.get("page_content", ""), metadata=s.get("metadata", {})) for s in turn]
+        [
+            Document(page_content=s.get("page_content", ""), metadata=s.get("metadata", {}))
+            for s in turn
+        ]
         for turn in raw
     ]
 
@@ -431,14 +509,68 @@ def load_vectorstore(
     ollama_embedding_model: str = OLLAMA_DEFAULT_EMBEDDING_MODEL,
     ollama_base_url: str = OLLAMA_DEFAULT_BASE_URL,
 ) -> FAISS | None:
-    """Load a previously saved FAISS index from disk. Returns None on failure."""
+    """Load a previously saved FAISS index from disk. Returns None on failure.
+
+    Security checks performed before deserialisation:
+
+    1. **Path confinement** — ``index_path`` must resolve (via ``realpath``)
+       to a directory inside ``FAISS_INDEXES_DIR``.  This prevents directory
+       traversal attacks from reaching arbitrary filesystem locations.
+
+    2. **HMAC integrity** — when ``FAISS_HMAC_SECRET`` is set, the stored
+       HMAC digest in ``metadata.json`` is recomputed over the artifact files
+       and compared with :func:`hmac.compare_digest` (constant-time).  If the
+       digest is absent or does not match the index is refused, preventing
+       tampered or substituted pickle files from being deserialised.
+
+    .. warning::
+        ``FAISS.load_local()`` uses ``pickle`` for ``index.pkl``.  Only load
+        indexes produced by this application.  Never copy index files from
+        untrusted sources into ``faiss_indexes/``.
+    """
     if not os.path.exists(index_path):
         return None
+
+    # --- 1. Path confinement ---
+    try:
+        _assert_within_base_dir(index_path, FAISS_INDEXES_DIR)
+    except ValueError as exc:
+        logger.warning("Refusing to load index outside base dir: %s", exc)
+        st.error(
+            "Index path is outside the expected storage directory. The index will not be loaded."
+        )
+        return None
+
+    # --- 2. HMAC integrity verification ---
+    secret = _get_hmac_secret()
+    if secret is not None:
+        meta = load_index_metadata(index_path)
+        stored_hmac = meta.get("hmac") if meta else None
+        if not stored_hmac:
+            logger.warning(
+                "FAISS_HMAC_SECRET is set but '%s' has no HMAC signature. "
+                "Re-process your documents to add integrity protection.",
+                index_path,
+            )
+            st.warning(
+                "Index integrity check failed: no HMAC signature found. "
+                "Re-process your documents to rebuild the index with integrity protection."
+            )
+            return None
+        computed_hmac = _compute_index_hmac(index_path)
+        if computed_hmac is None or not _hmac_module.compare_digest(computed_hmac, stored_hmac):
+            logger.warning("HMAC mismatch for FAISS index at '%s'", index_path)
+            st.error(
+                "Index integrity verification failed: the stored digest does not match. "
+                "The index files may have been tampered with. Re-process your documents."
+            )
+            return None
+
     try:
         embeddings = _get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)
         # allow_dangerous_deserialization is required by FAISS.load_local() for pickle-based
-        # indexes. Indexes are written only by this app (vectorstore.save_local()); loading
-        # third-party index files from untrusted sources would be unsafe.
+        # indexes. Indexes are written only by this app (vectorstore.save_local()).
+        # The path-confinement and HMAC checks above provide additional safeguards.
         return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
         logger.warning("Failed to load FAISS index from '%s': %s", index_path, e)
@@ -486,9 +618,7 @@ def get_conversation_chain(
             callbacks=callbacks,
             timeout=120,  # local models can be slow on first load
         )
-        condense_llm = ChatOllama(
-            model=model, base_url=ollama_base_url, temperature=0, timeout=60
-        )
+        condense_llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0, timeout=60)
     elif provider == PROVIDER_CLAUDE:
         claude_kwargs = {"api_key": api_key} if api_key else {}
         answer_llm = ChatAnthropic(
@@ -997,13 +1127,9 @@ def handle_userinput(user_question: str) -> None:
             stream_container.empty()
             err_lower = str(e).lower()
             if any(k in err_lower for k in ("api key", "authentication", "unauthorized", "401")):
-                st.error(
-                    "Authentication failed. Check your API key in the sidebar or .env file."
-                )
+                st.error("Authentication failed. Check your API key in the sidebar or .env file.")
             elif any(k in err_lower for k in ("rate limit", "429", "quota")):
-                st.error(
-                    "Rate limit reached. Wait a moment before sending another message."
-                )
+                st.error("Rate limit reached. Wait a moment before sending another message.")
             elif ("context" in err_lower and "length" in err_lower) or (
                 "maximum" in err_lower and "token" in err_lower
             ):
@@ -1012,9 +1138,7 @@ def handle_userinput(user_question: str) -> None:
                     "Start a new conversation to continue."
                 )
             elif any(k in err_lower for k in ("connection", "timeout", "network", "unreachable")):
-                st.error(
-                    "Connection error. Check your network connection and try again."
-                )
+                st.error("Connection error. Check your network connection and try again.")
             else:
                 st.error(
                     "An error occurred while generating a response. "
@@ -1205,9 +1329,7 @@ def main() -> None:
             if selected_claude_model != st.session_state.claude_model:
                 st.session_state.claude_model = selected_claude_model
                 _clear_conversation()
-                st.toast(
-                    f"Switched to {selected_claude_model} — chat history cleared.", icon="ℹ️"
-                )
+                st.toast(f"Switched to {selected_claude_model} — chat history cleared.", icon="ℹ️")
             st.caption(
                 "Embeddings use a local `all-MiniLM-L6-v2` model (no additional API key needed)."
             )
@@ -1345,7 +1467,9 @@ def main() -> None:
                         f"Completion tokens: {tracker['completion_tokens']:,}"
                     )
                     if st.session_state.provider == PROVIDER_CLAUDE:
-                        st.caption("Cost is estimated from public pricing; actual billing may differ.")
+                        st.caption(
+                            "Cost is estimated from public pricing; actual billing may differ."
+                        )
                     if st.button("Reset cost tracker", use_container_width=True):
                         st.session_state.cost_tracker = {
                             "turns": 0,
@@ -1592,7 +1716,9 @@ def main() -> None:
                                 try:
                                     pages, warns = future.result()
                                 except Exception as exc:
-                                    logger.error("Unexpected error extracting '%s': %s", pdf.name, exc)
+                                    logger.error(
+                                        "Unexpected error extracting '%s': %s", pdf.name, exc
+                                    )
                                     warns = [f"Unexpected error reading '{pdf.name}'."]
                                     pages = []
                                 for w in warns:
