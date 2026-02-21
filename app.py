@@ -1,4 +1,6 @@
+import concurrent.futures
 import json
+import logging
 import os
 import re
 import shutil
@@ -66,6 +68,17 @@ CLAUDE_COST_PER_1K: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (0.00080, 0.00400),
 }
 
+# ---------------------------------------------------------------------------
+# Structured logger — writes WARNING+ to stderr; caller configures handlers
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 # Only safe characters for user-supplied slot and session names.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][\w\-. ]*$")
 
@@ -120,7 +133,8 @@ def load_index_metadata(index_path: str) -> dict | None:
     try:
         with open(meta_path, encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.warning("Failed to load index metadata from '%s': %s", meta_path, e)
         return None
 
 
@@ -170,7 +184,7 @@ def list_sessions() -> list[str]:
 def save_session(name: str, chat_history: list[BaseMessage], sources: list[list[Document]]) -> None:
     """Persist the current conversation to sessions/<name>.json."""
     name = _safe_name(name, "Session name")
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    os.makedirs(SESSIONS_DIR, mode=0o700, exist_ok=True)
     path = os.path.join(SESSIONS_DIR, f"{name}.json")
     data = {
         "name": name,
@@ -199,7 +213,8 @@ def load_session(
         return _deserialize_messages(data.get("messages", [])), _deserialize_sources(
             data.get("sources", [])
         )
-    except Exception:
+    except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
+        logger.warning("Failed to load session '%s': %s", name, e)
         return None, None
 
 
@@ -215,9 +230,10 @@ def delete_session(name: str) -> None:
 
 
 def _clear_conversation() -> None:
-    """Reset conversation state: chat history, sources, and suggested questions."""
+    """Reset conversation state: chat history, sources, feedback, and suggested questions."""
     st.session_state.chat_history = []
     st.session_state.sources = []
+    st.session_state.feedback = []
     st.session_state.suggested_questions = []
 
 
@@ -272,26 +288,51 @@ class StreamHandler(BaseCallbackHandler):
 # ---------------------------------------------------------------------------
 
 
+def _extract_single_pdf(pdf: Any) -> tuple[list[tuple[str, str, int]], list[str]]:
+    """Extract text from one PDF without touching Streamlit — safe to call from threads.
+
+    Returns a tuple of (pages, warnings) where pages is a list of
+    (page_text, filename, page_number) tuples and warnings is a list of
+    human-readable warning strings to display in the UI.
+    """
+    pages: list[tuple[str, str, int]] = []
+    warnings: list[str] = []
+    try:
+        pdf_reader = PdfReader(pdf)
+        total_pages = len(pdf_reader.pages)
+        extracted = 0
+        for page_num, page in enumerate(pdf_reader.pages, start=1):
+            page_text = page.extract_text()
+            if page_text and page_text.strip():
+                pages.append((page_text, pdf.name, page_num))
+                extracted += 1
+        if total_pages > 0 and extracted == 0:
+            warnings.append(
+                f"'{pdf.name}' appears to be a scanned PDF (image-only) — no text could be "
+                "extracted. Use an OCR tool (e.g. Adobe Acrobat, Tesseract) to convert it first."
+            )
+    except Exception as e:
+        logger.warning("Could not read '%s': %s", pdf.name, e)
+        warnings.append(
+            f"Could not read '{pdf.name}'. "
+            "The file may be corrupt, password-protected, or not a valid PDF."
+        )
+    return pages, warnings
+
+
 def get_pdf_text(pdf_docs: list[Any]) -> list[tuple[str, str, int]]:
     """Extract text from each PDF; returns list of (page_text, filename, page_number) tuples.
 
     Each tuple represents one page so that chunk metadata can carry a page number.
     Pages with no extractable text are silently skipped. Files that fail to open
-    emit an st.warning() and are excluded entirely.
+    or are scanned PDFs emit st.warning() and are excluded entirely.
     """
     results = []
     for pdf in pdf_docs:
-        try:
-            pdf_reader = PdfReader(pdf)
-            for page_num, page in enumerate(pdf_reader.pages, start=1):
-                page_text = page.extract_text()
-                if page_text and page_text.strip():
-                    results.append((page_text, pdf.name, page_num))
-        except Exception:
-            st.warning(
-                f"Could not read '{pdf.name}'. "
-                "The file may be corrupt, password-protected, or not a valid PDF."
-            )
+        pages, warnings = _extract_single_pdf(pdf)
+        results.extend(pages)
+        for w in warnings:
+            st.warning(w)
     return results
 
 
@@ -399,7 +440,8 @@ def load_vectorstore(
         # indexes. Indexes are written only by this app (vectorstore.save_local()); loading
         # third-party index files from untrusted sources would be unsafe.
         return FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load FAISS index from '%s': %s", index_path, e)
         st.warning(
             "Could not load the saved index. "
             "It may be corrupt or incompatible with the current embedding model. "
@@ -442,8 +484,11 @@ def get_conversation_chain(
             temperature=temperature,
             streaming=True,
             callbacks=callbacks,
+            timeout=120,  # local models can be slow on first load
         )
-        condense_llm = ChatOllama(model=model, base_url=ollama_base_url, temperature=0)
+        condense_llm = ChatOllama(
+            model=model, base_url=ollama_base_url, temperature=0, timeout=60
+        )
     elif provider == PROVIDER_CLAUDE:
         claude_kwargs = {"api_key": api_key} if api_key else {}
         answer_llm = ChatAnthropic(
@@ -451,15 +496,21 @@ def get_conversation_chain(
             temperature=temperature,
             streaming=True,
             callbacks=callbacks,
+            timeout=60,
             **claude_kwargs,
         )
-        condense_llm = ChatAnthropic(model=model, temperature=0, **claude_kwargs)
+        condense_llm = ChatAnthropic(model=model, temperature=0, timeout=30, **claude_kwargs)
     else:
         kwargs = {"api_key": api_key} if api_key else {}
         answer_llm = ChatOpenAI(
-            model=model, temperature=temperature, streaming=True, callbacks=callbacks, **kwargs
+            model=model,
+            temperature=temperature,
+            streaming=True,
+            callbacks=callbacks,
+            timeout=60,
+            **kwargs,
         )
-        condense_llm = ChatOpenAI(model=model, temperature=0, **kwargs)
+        condense_llm = ChatOpenAI(model=model, temperature=0, timeout=30, **kwargs)
 
     # --- Retriever (with optional hybrid search, doc filter, and re-ranking) ---
     fetch_k = max(retrieval_k * 4, 20)
@@ -575,7 +626,8 @@ class RerankingRetriever(BaseRetriever):
             scores = encoder.predict([(query, d.page_content) for d in candidates])
             ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
             return [doc for _, doc in ranked[: self.top_k]]
-        except Exception:
+        except Exception as e:
+            logger.warning("Re-ranking failed, returning original order: %s", e)
             return candidates[: self.top_k]
 
 
@@ -725,7 +777,8 @@ def generate_suggested_questions(
         result = llm.invoke(prompt)
         lines = [ln.strip() for ln in result.content.splitlines() if ln.strip()]
         return lines[:5]
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to generate suggested questions: %s", e)
         return []
 
 
@@ -784,6 +837,7 @@ def format_conversation_as_markdown(
 def render_chat_history() -> None:
     """Render all previous turns from session state using st.chat_message()."""
     history = st.session_state.chat_history or []
+    feedback = st.session_state.get("feedback", [])
     bot_turn_idx = 0
     for i, message in enumerate(history):
         role = "user" if i % 2 == 0 else "assistant"
@@ -796,6 +850,29 @@ def render_chat_history() -> None:
                     else []
                 )
                 _render_sources(srcs)
+                # Answer quality feedback buttons
+                current_rating = feedback[bot_turn_idx] if bot_turn_idx < len(feedback) else None
+                up_col, down_col, _ = st.columns([1, 1, 8])
+                if up_col.button(
+                    "👍" if current_rating != "up" else "✅",
+                    key=f"feedback_up_{bot_turn_idx}",
+                    help="This answer was helpful",
+                ):
+                    if bot_turn_idx < len(st.session_state.feedback):
+                        st.session_state.feedback[bot_turn_idx] = (
+                            None if current_rating == "up" else "up"
+                        )
+                    st.rerun()
+                if down_col.button(
+                    "👎" if current_rating != "down" else "✅",
+                    key=f"feedback_down_{bot_turn_idx}",
+                    help="This answer was not helpful",
+                ):
+                    if bot_turn_idx < len(st.session_state.feedback):
+                        st.session_state.feedback[bot_turn_idx] = (
+                            None if current_rating == "down" else "down"
+                        )
+                    st.rerun()
                 bot_turn_idx += 1
 
 
@@ -905,7 +982,9 @@ def handle_userinput(user_question: str) -> None:
             st.session_state.chat_history.append(HumanMessage(content=user_question))
             st.session_state.chat_history.append(AIMessage(content=answer))
             st.session_state.sources.append(new_sources)
+            st.session_state.feedback.append(None)  # no rating yet
         except Exception as e:
+            logger.error("Error generating response: %s", e, exc_info=True)
             stream_container.empty()
             err_lower = str(e).lower()
             if any(k in err_lower for k in ("api key", "authentication", "unauthorized", "401")):
@@ -955,6 +1034,8 @@ def main() -> None:
         st.session_state.chat_history = []
     if "sources" not in st.session_state:
         st.session_state.sources = []
+    if "feedback" not in st.session_state:
+        st.session_state.feedback = []
     if "model" not in st.session_state:
         st.session_state.model = DEFAULT_MODEL
     if "chunk_strategy" not in st.session_state:
@@ -1303,29 +1384,63 @@ def main() -> None:
                     st.warning("Nothing to save — start a conversation first.")
 
             if saved:
-                selected_session = st.selectbox("Load session", [""] + saved)
-                load_col, del_col2 = st.columns(2)
-                if load_col.button("Load", use_container_width=True, disabled=not selected_session):
-                    hist, srcs = load_session(selected_session)
-                    if hist is not None:
-                        st.session_state.chat_history = hist
-                        st.session_state.sources = srcs
-                        st.session_state.suggested_questions = []
-                        st.rerun()
-                    else:
-                        st.error("Could not load session.")
-                confirm_del_session = del_col2.checkbox(
-                    "Confirm delete",
-                    key="confirm_del_session",
-                    help="Tick to enable session deletion.",
+                # Filter sessions by search query
+                search_query = st.text_input(
+                    "Search sessions",
+                    placeholder="Filter by name…",
+                    key="session_search_input",
                 )
-                if del_col2.button(
-                    "Delete",
-                    use_container_width=True,
-                    disabled=not selected_session or not confirm_del_session,
-                ):
-                    delete_session(selected_session)
-                    st.rerun()
+                visible = (
+                    [s for s in saved if search_query.lower() in s.lower()]
+                    if search_query
+                    else saved
+                )
+
+                if visible:
+                    selected_session = st.selectbox("Load session", [""] + visible)
+                    load_col, del_col2 = st.columns(2)
+                    if load_col.button(
+                        "Load", use_container_width=True, disabled=not selected_session
+                    ):
+                        hist, srcs = load_session(selected_session)
+                        if hist is not None:
+                            st.session_state.chat_history = hist
+                            st.session_state.sources = srcs
+                            st.session_state.feedback = [None] * (len(hist) // 2)
+                            st.session_state.suggested_questions = []
+                            st.rerun()
+                        else:
+                            st.error("Could not load session.")
+                    confirm_del_session = del_col2.checkbox(
+                        "Confirm delete",
+                        key="confirm_del_session",
+                        help="Tick to enable session deletion.",
+                    )
+                    if del_col2.button(
+                        "Delete",
+                        use_container_width=True,
+                        disabled=not selected_session or not confirm_del_session,
+                    ):
+                        delete_session(selected_session)
+                        st.rerun()
+
+                    # Bulk delete
+                    st.caption("Bulk delete:")
+                    to_delete = st.multiselect(
+                        "Select sessions to delete",
+                        options=visible,
+                        label_visibility="collapsed",
+                    )
+                    if st.button(
+                        f"Delete {len(to_delete)} selected",
+                        disabled=not to_delete,
+                        use_container_width=True,
+                    ):
+                        for s in to_delete:
+                            delete_session(s)
+                        st.rerun()
+                else:
+                    st.caption(f"No sessions match '{search_query}'.")
             else:
                 st.caption("No saved sessions yet.")
 
@@ -1353,7 +1468,7 @@ def main() -> None:
             if cre_col.button("Create", use_container_width=True, disabled=not new_slot_name):
                 try:
                     name = _safe_name(new_slot_name, "Slot name")
-                    os.makedirs(slot_path(name), exist_ok=True)
+                    os.makedirs(slot_path(name), mode=0o700, exist_ok=True)
                     st.session_state.active_slot = name
                     st.session_state.vectorstore = None
                     _clear_conversation()
@@ -1451,14 +1566,29 @@ def main() -> None:
             else:
                 try:
                     with st.status("Processing documents…", expanded=True) as proc_status:
-                        # Step 1 — text extraction (per-file)
+                        # Step 1 — text extraction (parallelised per-file)
                         st.write(f"Extracting text from {len(pdf_docs)} PDF(s)…")
                         prog = st.progress(0.0)
                         texts_with_meta = []
-                        for idx, pdf in enumerate(pdf_docs):
-                            partial = get_pdf_text([pdf])
-                            texts_with_meta.extend(partial)
-                            prog.progress((idx + 1) / len(pdf_docs) * 0.35)
+                        with concurrent.futures.ThreadPoolExecutor() as pool:
+                            future_to_pdf = {
+                                pool.submit(_extract_single_pdf, pdf): (idx, pdf)
+                                for idx, pdf in enumerate(pdf_docs)
+                            }
+                            completed = 0
+                            for future in concurrent.futures.as_completed(future_to_pdf):
+                                idx, pdf = future_to_pdf[future]
+                                try:
+                                    pages, warns = future.result()
+                                except Exception as exc:
+                                    logger.error("Unexpected error extracting '%s': %s", pdf.name, exc)
+                                    warns = [f"Unexpected error reading '{pdf.name}'."]
+                                    pages = []
+                                for w in warns:
+                                    st.warning(w)
+                                texts_with_meta.extend(pages)
+                                completed += 1
+                                prog.progress(completed / len(pdf_docs) * 0.35)
 
                         if not texts_with_meta:
                             proc_status.update(label="Extraction failed", state="error")
@@ -1497,7 +1627,7 @@ def main() -> None:
                             # Step 4 — persist
                             st.write("Saving index to disk…")
                             prog.progress(0.9)
-                            os.makedirs(active_path, exist_ok=True)
+                            os.makedirs(active_path, mode=0o700, exist_ok=True)
                             vectorstore.save_local(active_path)
                             save_index_metadata(
                                 filenames=list(dict.fromkeys(t[1] for t in texts_with_meta)),
@@ -1537,6 +1667,7 @@ def main() -> None:
                                 expanded=False,
                             )
                 except Exception as e:
+                    logger.error("Document processing failed: %s", e, exc_info=True)
                     st.error(f"Error processing documents: {e}")
 
         if os.path.exists(active_path):
