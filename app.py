@@ -57,15 +57,15 @@ PROVIDERS = [PROVIDER_OPENAI, PROVIDER_CLAUDE, PROVIDER_OLLAMA]
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "llama3.2"
 OLLAMA_DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
-AVAILABLE_CLAUDE_MODELS = ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"]
+AVAILABLE_CLAUDE_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-6"]
 DEFAULT_CLAUDE_MODEL = AVAILABLE_CLAUDE_MODELS[0]
 
 # Approximate USD per 1 000 tokens (input / output) for Claude models.
 # Used only for display; actual billing may differ.
 CLAUDE_COST_PER_1K: dict[str, tuple[float, float]] = {
-    "claude-opus-4-5": (0.01500, 0.07500),
-    "claude-sonnet-4-5": (0.00300, 0.01500),
-    "claude-haiku-4-5": (0.00080, 0.00400),
+    "claude-opus-4-6": (0.01500, 0.07500),
+    "claude-sonnet-4-6": (0.00300, 0.01500),
+    "claude-haiku-4-6": (0.00080, 0.00400),
 }
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ Three LLM providers are supported:
 | Source attribution | Expandable source snippets below each answer |
 | Answer feedback | 👍/👎 buttons below each answer to rate response quality |
 | OpenAI models | Choose between `gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o` |
-| Claude models | Choose between `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`; embeddings use a local model |
+| Claude models | Choose between `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-6`; embeddings use a local model |
 | Ollama (local) | Use any locally-running Ollama model (e.g. `llama3.2`, `mistral`) |
 | **Hybrid search** | Fuse BM25 keyword search with FAISS vector search via Reciprocal Rank Fusion (RRF) for better recall on exact-term queries |
 | **Per-document filter** | Restrict retrieval to a selected subset of uploaded files; shown as a multiselect when the index contains more than one document |
@@ -97,7 +97,7 @@ make run   # or: streamlit run app.py
 
 1. Select **Claude (Anthropic)** in the provider radio at the top of the sidebar.
 2. Enter your Anthropic API key in the sidebar (or set `ANTHROPIC_API_KEY` in `.env`).
-3. Choose a model from the dropdown (`claude-opus-4-5`, `claude-sonnet-4-5`, or `claude-haiku-4-5`).
+3. Choose a model from the dropdown (`claude-opus-4-6`, `claude-sonnet-4-6`, or `claude-haiku-4-6`).
 4. Upload one or more PDF files under **Your documents** and click **Process**.
 5. Ask questions in the chat input.
 
@@ -142,7 +142,7 @@ Use the **Reset cost tracker** button to start a fresh count without clearing th
 
 > **OpenAI** costs are tracked via `get_openai_callback()` (LangChain Community). Approximate list prices: `gpt-4o-mini` $0.15/$0.60, `gpt-3.5-turbo` $0.50/$1.50, `gpt-4o` $2.50/$10.00 per 1 M tokens.
 >
-> **Claude** costs are estimated from public Anthropic pricing: `claude-opus-4-5` $15.00/$75.00, `claude-sonnet-4-5` $3.00/$15.00, `claude-haiku-4-5` $0.80/$4.00 per 1 M tokens. Actual billing may differ.
+> **Claude** costs are estimated from public Anthropic pricing: `claude-opus-4-6` $15.00/$75.00, `claude-sonnet-4-6` $3.00/$15.00, `claude-haiku-4-6` $0.80/$4.00 per 1 M tokens. Actual billing may differ.
 
 ### Sidebar Options
 
@@ -150,7 +150,7 @@ Use the **Reset cost tracker** button to start a fresh count without clearing th
 |---|---|
 | **Provider** | Switch between OpenAI, Claude (Anthropic), and Ollama (local); clears the index and history |
 | **OpenAI settings** | API key input, model selector (`gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o`) |
-| **Claude settings** | Anthropic API key input, model selector (`claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`) |
+| **Claude settings** | Anthropic API key input, model selector (`claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-6`) |
 | **Ollama settings** | Base URL, chat model name, embedding model name |
 | **Cost tracker** | Session token counts and estimated USD cost (OpenAI and Claude); reset button |
 | **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking, **Hybrid search**, **Filter by document** |
