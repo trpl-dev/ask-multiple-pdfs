@@ -674,7 +674,7 @@ class HybridRetriever(BaseRetriever):
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> list[Document]:
-        fetch_k = max(self.top_k * 4, 20)
+        fetch_k = min(max(self.top_k * 4, 20), 200)
 
         # --- Vector branch ---
         if self.retrieval_mode == "MMR":
@@ -1224,6 +1224,7 @@ def main() -> None:
                 placeholder="e.g. llama3.2, mistral, qwen2.5, gemma2",
                 help="Name of the Ollama model to use for chat (must be pulled first).",
             )
+            new_ollama_model = new_ollama_model.strip()
             if new_ollama_model and new_ollama_model != st.session_state.ollama_model:
                 st.session_state.ollama_model = new_ollama_model
                 _clear_conversation()
@@ -1237,6 +1238,7 @@ def main() -> None:
                     "Changing this requires re-processing your documents."
                 ),
             )
+            new_embedding_model = new_embedding_model.strip()
             if (
                 new_embedding_model
                 and new_embedding_model != st.session_state.ollama_embedding_model
@@ -1408,8 +1410,8 @@ def main() -> None:
                         hist, srcs = load_session(selected_session)
                         if hist is not None:
                             st.session_state.chat_history = hist
-                            st.session_state.sources = srcs
-                            st.session_state.feedback = [None] * (len(hist) // 2)
+                            st.session_state.sources = srcs or []
+                            st.session_state.feedback = [None] * len(st.session_state.sources)
                             st.session_state.suggested_questions = []
                             st.rerun()
                         else:
