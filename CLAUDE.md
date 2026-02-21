@@ -13,8 +13,8 @@ This is an educational project accompanying a YouTube tutorial. It is not intend
 ```
 ask-multiple-pdfs/
 ├── app.py                # Sole application file — all business logic and Streamlit UI
-├── htmlTemplates.py      # HTML/CSS templates (legacy; no longer imported by app.py)
 ├── requirements.txt      # Python dependencies (unpinned ranges, modern versions)
+├── requirements-lock.txt # Pinned transitive dependencies (pip freeze snapshot)
 ├── pyproject.toml        # Ruff linter/formatter configuration
 ├── Makefile              # Convenience targets: run, install, lint, format, test, docker-*
 ├── Dockerfile            # Single-stage python:3.11-slim image with HEALTHCHECK
@@ -28,10 +28,11 @@ ask-multiple-pdfs/
 │   └── PDF-LangChain.jpg # Architecture diagram referenced in readme.md
 └── tests/
     ├── __init__.py
-    ├── test_chunking.py  # 9 tests for get_text_chunks()
-    ├── test_pdf.py       # 5 tests for get_pdf_text()
-    ├── test_metadata.py  # 5 tests for save/load_index_metadata()
-    └── test_sessions.py  # 18 tests for session persistence helpers
+    ├── test_chunking.py   # 9 tests for get_text_chunks()
+    ├── test_pdf.py        # 5 tests for get_pdf_text()
+    ├── test_metadata.py   # 5 tests for save/load_index_metadata()
+    ├── test_sessions.py   # 18 tests for session persistence helpers
+    └── test_retrievers.py # 15 tests for FilteredRetriever, RerankingRetriever, HybridRetriever
 ```
 
 Runtime directories (gitignored, created on first use):
@@ -100,7 +101,9 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`StreamHandler(BaseCallbackHandler)`** — appends `▌` cursor on each token; removes it on LLM end. Uses `st.empty()` placeholder passed at construction time.
 
-**`get_pdf_text(pdf_docs)`** → `list[tuple[str, str, int]]` — returns `(text, filename, page_number)` tuples (one per page); skips pages with no extractable text and emits `st.warning()` for files that fail to open.
+**`_extract_single_pdf(pdf)`** → `tuple[list[tuple[str, str, int]], list[str]]` — extracts pages from a single PDF file; detects image-only (scanned) PDFs where all pages yield zero text and emits a user-friendly warning suggesting OCR tools. Returns `(pages, warning_strings)`.
+
+**`get_pdf_text(pdf_docs)`** → `list[tuple[str, str, int]]` — orchestrates parallel extraction using `concurrent.futures.ThreadPoolExecutor`; calls `_extract_single_pdf` per file, collects warnings on the main thread for Streamlit compatibility, returns `(text, filename, page_number)` tuples (one per page).
 
 **`get_text_chunks(texts_with_meta, strategy, chunk_size, chunk_overlap, semantic_threshold, api_key)`** → `tuple[list[str], list[dict]]` — supports:
 - `CHUNK_STRATEGY_CHAR`: `CharacterTextSplitter(separator="\n", ...)`
@@ -135,15 +138,11 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`format_conversation_as_markdown(chat_history, sources)`** → `str` — Markdown export for download.
 
-**`render_chat_history()`** — replays all `st.session_state.chat_history` turns using `st.chat_message()`; shows sources below each assistant turn.
+**`render_chat_history()`** — replays all `st.session_state.chat_history` turns using `st.chat_message()`; shows sources below each assistant turn; renders 👍/👎 feedback buttons per bot turn with ratings stored in `st.session_state.feedback` (parallel list to `sources`).
 
-**`handle_userinput(user_question)`** — guards against missing vectorstore and questions exceeding `MAX_QUESTION_LENGTH`; renders user bubble; shows a "Thinking…" placeholder while waiting for the first streaming token; streams answer into assistant bubble via fresh `StreamHandler`; appends sources to `st.session_state.sources`. Errors are classified (auth, rate-limit, context-length, network) into user-friendly messages rather than raw exceptions. When using OpenAI, wraps `chain.invoke()` with `get_openai_callback()` and accumulates token counts and cost into `st.session_state.cost_tracker`.
+**`handle_userinput(user_question)`** — guards against missing vectorstore and questions exceeding `MAX_QUESTION_LENGTH`; renders user bubble; shows a "Thinking…" placeholder while waiting for the first streaming token; streams answer into assistant bubble via fresh `StreamHandler`; appends sources to `st.session_state.sources` and `None` to `st.session_state.feedback`. Errors are classified (auth, rate-limit, context-length, network) into user-friendly messages rather than raw exceptions. For OpenAI, wraps `chain.invoke()` with `get_openai_callback()` to capture exact token counts; for Claude, estimates cost from `CLAUDE_COST_PER_1K` using response metadata; both accumulate into `st.session_state.cost_tracker`.
 
-**`main()`** — Streamlit entry point: `load_dotenv()`, session state init, auto-load of active slot's FAISS index, chat area (history + suggested questions + `st.chat_input()`), full sidebar.
-
-### `htmlTemplates.py`
-
-No longer imported by `app.py` (replaced by native `st.chat_message()` in Step 2). Kept for reference. Contains `css`, `bot_template`, `user_template` with self-contained SVG avatar data URIs.
+**`main()`** — Streamlit entry point: `load_dotenv()`, session state init, auto-load of active slot's FAISS index, chat area (history + suggested questions + `st.chat_input()`), full sidebar. The Sessions expander includes a search text input to filter saved sessions by name and a multiselect for bulk deletion.
 
 ### `tests/`
 
@@ -153,6 +152,7 @@ No longer imported by `app.py` (replaced by native `st.chat_message()` in Step 2
 | `test_pdf.py` | 5 | `get_pdf_text()`: single/multiple PDFs, no-text excluded, broken PDF warning, mixed good/broken |
 | `test_metadata.py` | 5 | `save_index_metadata()` / `load_index_metadata()`: roundtrip, missing file → None, corrupt JSON → None, overwrite, UTC ISO timestamp |
 | `test_sessions.py` | 18 | `_serialize/deserialize_messages()`, `_serialize/deserialize_sources()`, `save/load/list/delete_session()`, `_safe_name()`, `_truncate_history()` |
+| `test_retrievers.py` | 15 | `FilteredRetriever` (5), `RerankingRetriever` (5), `HybridRetriever` (5): filtering logic, reranking order, RRF fusion, fallback behavior |
 
 ---
 
@@ -163,6 +163,7 @@ No longer imported by `app.py` (replaced by native `st.chat_message()` in Step 2
 | `vectorstore` | `FAISS \| None` | Active vector store for the current slot |
 | `chat_history` | `list[BaseMessage]` | Alternating HumanMessage / AIMessage; passed explicitly to each chain invocation |
 | `sources` | `list[list[Document]]` | Source docs per bot turn |
+| `feedback` | `list[str \| None]` | User rating per bot turn (`"up"`, `"down"`, or `None`); parallel to `sources` |
 | `model` | `str` | Selected OpenAI model name |
 | `temperature` | `float` | LLM temperature (0.0–1.0) |
 | `retrieval_k` | `int` | Number of chunks retrieved per question |
@@ -232,7 +233,7 @@ make run   # or: streamlit run app.py
 | `make install` | Install all dependencies from `requirements.txt` |
 | `make lint` | Run ruff linter |
 | `make format` | Run ruff formatter |
-| `make test` | Run pytest (37 unit tests) |
+| `make test` | Run pytest (52 unit tests) |
 | `make docker-build` | Build Docker image |
 | `make docker-up` | Build and start via Docker Compose (detached) |
 | `make docker-down` | Stop Docker Compose services |
@@ -303,7 +304,7 @@ make format   # auto-fix formatting
 
 6. **Per-document filter is only shown for multi-file indexes** — The "Filter by document" multiselect only appears when the active index contains more than one file. It resets to empty whenever new documents are processed.
 
-7. **Cost tracker is OpenAI-only** — The tracker widget is hidden for Ollama sessions. It uses `get_openai_callback()` from `langchain_community`; actual billed amounts may differ from estimates.
+7. **Cost tracker is hidden for Ollama sessions** — OpenAI costs are captured via `get_openai_callback()`; Claude costs are estimated from `CLAUDE_COST_PER_1K` using token counts from response metadata. The tracker widget is not shown for Ollama.
 
 8. **`text_chunks` and `chunk_metadatas` are stored in session state** — They are needed by `HybridRetriever` at query time. They are populated during the Process step and cleared when a new index is loaded from disk (disk-loaded indexes do not persist chunk lists between server restarts; hybrid search is disabled automatically in that case because `text_chunks` is empty).
 
@@ -311,21 +312,24 @@ make format   # auto-fix formatting
 
 10. **No test suite for UI functions** — All Streamlit widget code must be manually verified by running `streamlit run app.py`.
 
-11. **`htmlTemplates.py` is now unused** — The file is kept for reference but is no longer imported.
+11. **Scanned PDFs are detected but not extracted** — `_extract_single_pdf` checks for pages with zero extractable text and emits a warning directing users to OCR tools. The file is skipped entirely.
+
+12. **Parallel PDF extraction does not guarantee page order across files** — `ThreadPoolExecutor` processes files concurrently; results are re-assembled in original file order before chunking.
 
 ---
 
 ## What AI Assistants Should Know
 
-- **The entire application is in `app.py`.** `htmlTemplates.py` is no longer used.
+- **The entire application is in `app.py`.** `htmlTemplates.py` has been deleted.
 - **Session state is the persistence layer.** No database. Disk state: `faiss_indexes/{slot}/` (FAISS + metadata.json) and `sessions/*.json` (chat history).
 - **FAISS indexes are per-slot.** `active_path = slot_path(st.session_state.active_slot)` is computed once at the top of `main()` and reused throughout.
 - **Chain is rebuilt per invocation** — `get_conversation_chain()` is called inside `handle_userinput()` so a fresh `StreamHandler` can be injected. No memory object is needed; history is passed explicitly.
 - **Chain invocation:** `chain.invoke({"input": user_question, "chat_history": st.session_state.chat_history})`. Response keys: `response["answer"]` (str) and `response["context"]` (list[Document]).
-- **History is managed manually** — after each turn, `HumanMessage` and `AIMessage` are appended to `st.session_state.chat_history`.
+- **History is managed manually** — after each turn, `HumanMessage` and `AIMessage` are appended to `st.session_state.chat_history`; `None` is appended to `st.session_state.feedback`.
 - **Retriever build order:** base (HybridRetriever or FAISS) → FilteredRetriever (if `doc_filter`) → RerankingRetriever (if `reranker_enabled`).
 - **BM25 index is cached** via `@st.cache_resource` in `_build_bm25()`; the cache key is `id(corpus)` (changes when `st.session_state.text_chunks` is replaced after re-processing).
-- **Cost tracker dict keys:** `turns`, `prompt_tokens`, `completion_tokens`, `total_cost` (float). Updated in `handle_userinput()` inside a `get_openai_callback()` context only for the OpenAI provider.
+- **Cost tracker dict keys:** `turns`, `prompt_tokens`, `completion_tokens`, `total_cost` (float). Updated for OpenAI via `get_openai_callback()` and for Claude via estimated costs from response token metadata.
+- **`_clear_conversation()`** resets `chat_history`, `sources`, `feedback`, and `suggested_questions`. Call it in every code path that clears state.
 - **Run `make lint` before committing** to ensure ruff passes cleanly.
 - **Do not pin dependencies to exact versions.** Use `>=x.y.z` style.
 - **`save_index_metadata` and `load_index_metadata` require `index_path`** — they no longer use a global constant. Pass the result of `slot_path(slot_name)`.

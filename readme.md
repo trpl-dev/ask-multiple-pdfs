@@ -30,12 +30,15 @@ Three LLM providers are supported:
 | Multi-PDF chat | Upload and query multiple PDFs simultaneously |
 | Streaming answers | Token-level streaming with a live cursor |
 | Source attribution | Expandable source snippets below each answer |
+| Answer feedback | 👍/👎 buttons below each answer to rate response quality |
 | OpenAI models | Choose between `gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o` |
 | Claude models | Choose between `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-haiku-4-5`; embeddings use a local model |
 | Ollama (local) | Use any locally-running Ollama model (e.g. `llama3.2`, `mistral`) |
 | **Hybrid search** | Fuse BM25 keyword search with FAISS vector search via Reciprocal Rank Fusion (RRF) for better recall on exact-term queries |
 | **Per-document filter** | Restrict retrieval to a selected subset of uploaded files; shown as a multiselect when the index contains more than one document |
 | **Cost tracker** | Tracks token usage (prompt + completion) and estimated USD cost per session for OpenAI and Claude; reset button included |
+| Parallel PDF extraction | Multiple PDFs are processed concurrently for faster indexing |
+| Scanned PDF detection | Image-only PDFs are detected and flagged with a helpful warning |
 | System prompt | Optional instructions prepended to every QA prompt |
 | Temperature & k | Tune creativity and number of retrieved chunks |
 | Retrieval mode | Similarity or MMR (diversity-aware) |
@@ -43,7 +46,7 @@ Three LLM providers are supported:
 | Chunking UI | Character splitter (configurable size/overlap) or Semantic splitter |
 | Suggested questions | LLM-generated one-click questions after processing |
 | Conversation export | Download chat history as Markdown |
-| Session persistence | Save, load, and delete named chat sessions (JSON) |
+| Session persistence | Save, load, search, and bulk-delete named chat sessions (JSON) |
 | Multiple index slots | Maintain independent FAISS indexes per project/topic |
 | Docker support | One-command startup with `docker compose up` |
 
@@ -151,7 +154,7 @@ Use the **Reset cost tracker** button to start a fresh count without clearing th
 | **Ollama settings** | Base URL, chat model name, embedding model name |
 | **Cost tracker** | Session token counts and estimated USD cost (OpenAI and Claude); reset button |
 | **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking, **Hybrid search**, **Filter by document** |
-| **Sessions** | Save/load/delete named chat sessions (delete requires confirmation) |
+| **Sessions** | Save/load named chat sessions; search by name; bulk-delete via multiselect (delete requires confirmation) |
 | **Index slots** | Create and switch between independent FAISS indexes |
 | **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |
 | **Your documents** | Index status indicator, PDF uploader, Process button, Clear saved index |
@@ -161,7 +164,7 @@ Use the **Reset cost tracker** button to start a fresh count without clearing th
 ```bash
 make lint      # ruff linter
 make format    # ruff formatter
-make test      # pytest (37 unit tests)
+make test      # pytest (52 unit tests)
 ```
 
 ## Contributing
