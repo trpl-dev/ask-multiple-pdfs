@@ -154,9 +154,9 @@ def _deserialize_messages(data: list[dict]) -> list[BaseMessage]:
     result = []
     for d in data:
         if d.get("type") == "human":
-            result.append(HumanMessage(content=d["content"]))
+            result.append(HumanMessage(content=d.get("content", "")))
         else:
-            result.append(AIMessage(content=d["content"]))
+            result.append(AIMessage(content=d.get("content", "")))
     return result
 
 
@@ -169,7 +169,7 @@ def _serialize_sources(sources: list[list[Document]]) -> list[list[dict]]:
 
 def _deserialize_sources(raw: list[list[dict]]) -> list[list[Document]]:
     return [
-        [Document(page_content=s["page_content"], metadata=s.get("metadata", {})) for s in turn]
+        [Document(page_content=s.get("page_content", ""), metadata=s.get("metadata", {})) for s in turn]
         for turn in raw
     ]
 
@@ -888,6 +888,12 @@ def _truncate_history(history: list[BaseMessage], max_turns: int) -> list[BaseMe
     """
     max_messages = max_turns * 2
     if len(history) > max_messages:
+        # If the history has an odd number of messages (e.g. a corrupted session
+        # was loaded), slicing by an even max_messages would start the window on
+        # an AIMessage rather than a HumanMessage.  Drop the leading orphan first
+        # so that the slice always begins with a complete human/AI pair.
+        if len(history) % 2 != 0:
+            history = history[1:]
         return history[-max_messages:]
     return history
 
