@@ -49,6 +49,7 @@ Three LLM providers are supported:
 | Session persistence | Save, load, search, and bulk-delete named chat sessions (JSON) |
 | Multiple index slots | Maintain independent FAISS indexes per project/topic |
 | Docker support | One-command startup with `docker compose up` |
+| **FAISS index integrity** | Optional HMAC-SHA256 signing and verification of saved indexes; path-confinement check prevents directory-traversal attacks when loading indexes |
 
 ## Installation
 
@@ -159,12 +160,34 @@ Use the **Reset cost tracker** button to start a fresh count without clearing th
 | **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |
 | **Your documents** | Index status indicator, PDF uploader, Process button, Clear saved index |
 
+## Security
+
+### FAISS Index Integrity (HMAC-SHA256)
+
+FAISS indexes are loaded with `allow_dangerous_deserialization=True` because the underlying `index.pkl` file is pickle-based.  A tampered or substituted index file is therefore a potential code-execution vector.
+
+Two safeguards are applied automatically at load time:
+
+1. **Path confinement** — the resolved real path of the index directory must be inside `faiss_indexes/`; symlink tricks or `../` traversal are rejected.
+2. **HMAC integrity** *(opt-in)* — when `FAISS_HMAC_SECRET` is set, every index is signed with HMAC-SHA256 after processing and the signature is verified before loading.  A missing or mismatched signature causes the load to be refused and an error is shown.
+
+To enable HMAC verification:
+
+```bash
+# in .env
+FAISS_HMAC_SECRET=<generate a strong random value, e.g. openssl rand -hex 32>
+```
+
+Existing indexes saved before the secret was set will be rejected on next load — simply re-process your documents to rebuild them with a valid signature.
+
+When `FAISS_HMAC_SECRET` is not set (the default), both checks degrade gracefully: path confinement is still enforced; the HMAC step is a no-op.
+
 ## Development
 
 ```bash
 make lint      # ruff linter
 make format    # ruff formatter
-make test      # pytest (52 unit tests)
+make test      # pytest (67 unit tests)
 ```
 
 ## Contributing
