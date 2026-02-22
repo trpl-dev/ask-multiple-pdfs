@@ -30,9 +30,10 @@ ask-multiple-pdfs/
     ├── __init__.py
     ├── test_chunking.py   # 9 tests for get_text_chunks()
     ├── test_pdf.py        # 5 tests for get_pdf_text()
-    ├── test_metadata.py   # 5 tests for save/load_index_metadata()
+    ├── test_metadata.py   # 20 tests for save/load_index_metadata(), HMAC helpers, path-confinement guard
     ├── test_sessions.py   # 18 tests for session persistence helpers
-    └── test_retrievers.py # 15 tests for FilteredRetriever, RerankingRetriever, HybridRetriever
+    ├── test_retrievers.py # 15 tests for FilteredRetriever, RerankingRetriever, HybridRetriever
+    └── test_safe_rag.py   # 13 tests for SAFE_RAG_INSTRUCTIONS content and get_conversation_chain() prompt injection
 ```
 
 Runtime directories (gitignored, created on first use):
@@ -63,7 +64,7 @@ PDF Upload → Text Extraction → Chunking → Embedding → Vector Store → C
 
 ## Key Files
 
-### `app.py` (~1 720 lines)
+### `app.py` (~1 906 lines)
 
 The entire application. All functions have full type annotations (Python 3.11 native generics).
 
@@ -76,25 +77,38 @@ The entire application. All functions have full type annotations (Python 3.11 na
 | `SESSIONS_DIR` | `"sessions"` | Directory for saved chat session JSON files |
 | `AVAILABLE_MODELS` | `["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4o"]` | Selectable OpenAI models |
 | `DEFAULT_MODEL` | `AVAILABLE_MODELS[0]` | |
-| `CHUNK_STRATEGY_CHAR/SEMANTIC` | string literals | Chunking strategy identifiers |
+| `CHUNK_STRATEGY_CHAR` | `"Character (fast)"` | Character splitter strategy identifier |
+| `CHUNK_STRATEGY_SEMANTIC` | `"Semantic (accurate)"` | Semantic splitter strategy identifier |
+| `CHUNK_STRATEGIES` | `[CHUNK_STRATEGY_CHAR, CHUNK_STRATEGY_SEMANTIC]` | Ordered list for UI dropdown |
 | `RETRIEVAL_MODES` | `["Similarity", "MMR"]` | FAISS retrieval modes (Hybrid is a separate toggle) |
 | `DEFAULT_TEMPERATURE` | `0.0` | LLM temperature |
 | `DEFAULT_RETRIEVAL_K` | `4` | Default number of retrieved chunks |
-| `RERANKER_MODEL` | `"cross-encoder/ms-marco-MiniLM-L-6-v2"` | Cross-encoder model name |
+| `MAX_HISTORY_TURNS` | `20` | Maximum human/AI turn pairs sent to the LLM in context |
 | `MAX_QUESTION_LENGTH` | `5_000` | Character cap for a single user question; longer inputs are rejected with a warning |
+| `SAFE_RAG_INSTRUCTIONS` | multi-line string constant | Prompt-injection resistance rules prepended to the QA system message when `safe_rag_mode=True` (default). Instructs the LLM to answer only from context, ignore embedded instructions, and never reveal secrets. |
 | `OPENAI_COST_PER_1K` | `dict[str, tuple[float, float]]` | Approximate input/output cost per 1 000 tokens per model (display only) |
-| `PROVIDER_OPENAI/CLAUDE/OLLAMA` | string literals | Provider identifier constants |
+| `PROVIDER_OPENAI` | `"OpenAI"` | Provider identifier |
+| `PROVIDER_CLAUDE` | `"Claude (Anthropic)"` | Provider identifier |
+| `PROVIDER_OLLAMA` | `"Ollama (local)"` | Provider identifier |
 | `PROVIDERS` | `[PROVIDER_OPENAI, PROVIDER_CLAUDE, PROVIDER_OLLAMA]` | Ordered list of selectable providers |
+| `OLLAMA_DEFAULT_BASE_URL` | `"http://localhost:11434"` | Default Ollama server URL |
+| `OLLAMA_DEFAULT_MODEL` | `"llama3.2"` | Default Ollama chat model |
+| `OLLAMA_DEFAULT_EMBEDDING_MODEL` | `"nomic-embed-text"` | Default Ollama embedding model |
 | `AVAILABLE_CLAUDE_MODELS` | `["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-6"]` | Selectable Claude models |
 | `DEFAULT_CLAUDE_MODEL` | `AVAILABLE_CLAUDE_MODELS[0]` | |
 | `CLAUDE_COST_PER_1K` | `dict[str, tuple[float, float]]` | Approximate input/output cost per 1 000 tokens for Claude models (display only) |
-| `MAX_HISTORY_TURNS` | `20` | Maximum human/AI turn pairs sent to the LLM in context |
+| `RERANKER_MODEL` | `"cross-encoder/ms-marco-MiniLM-L-6-v2"` | Cross-encoder model name |
 
 **Index slot helpers**
 - **`slot_path(slot)`** — returns `faiss_indexes/{slot}`
 - **`list_index_slots()`** — returns sorted list of existing slot directory names
-- **`save_index_metadata(filenames, chunk_count, index_path)`** — writes `metadata.json` into the slot dir
+- **`save_index_metadata(filenames, chunk_count, index_path)`** — writes `metadata.json` into the slot dir; includes an HMAC digest when `FAISS_HMAC_SECRET` is set
 - **`load_index_metadata(index_path)`** — reads `metadata.json`; returns `None` if missing or corrupt
+
+**FAISS integrity helpers**
+- **`_get_hmac_secret()`** → `bytes | None` — returns the secret from `FAISS_HMAC_SECRET` env var, or `None` if unset
+- **`_compute_index_hmac(index_path)`** → `str | None` — HMAC-SHA256 over `index.faiss` + `index.pkl`; returns `None` when secret is unset or files are missing
+- **`_assert_within_base_dir(path, base_dir)`** — raises `ValueError` if the resolved real path of `path` is not inside `base_dir`; prevents directory-traversal and symlink attacks
 
 **Session persistence helpers** (serialize/deserialize `BaseMessage` and `Document` objects to/from JSON)
 - `_serialize_messages()` / `_deserialize_messages()`
@@ -105,24 +119,29 @@ The entire application. All functions have full type annotations (Python 3.11 na
 
 **`get_api_key()`** — UI input priority over `OPENAI_API_KEY` env var; returns `None` if neither set.
 
+**`get_claude_api_key()`** — UI input priority over `ANTHROPIC_API_KEY` env var; returns `None` if neither set.
+
 **`StreamHandler(BaseCallbackHandler)`** — appends `▌` cursor on each token; removes it on LLM end. Uses `st.empty()` placeholder passed at construction time.
 
 **`_extract_single_pdf(pdf)`** → `tuple[list[tuple[str, str, int]], list[str]]` — extracts pages from a single PDF file; detects image-only (scanned) PDFs where all pages yield zero text and emits a user-friendly warning suggesting OCR tools. Returns `(pages, warning_strings)`.
 
 **`get_pdf_text(pdf_docs)`** → `list[tuple[str, str, int]]` — orchestrates parallel extraction using `concurrent.futures.ThreadPoolExecutor`; calls `_extract_single_pdf` per file, collects warnings on the main thread for Streamlit compatibility, returns `(text, filename, page_number)` tuples (one per page).
 
-**`get_text_chunks(texts_with_meta, strategy, chunk_size, chunk_overlap, semantic_threshold, api_key)`** → `tuple[list[str], list[dict]]` — supports:
+**`get_text_chunks(texts_with_meta, strategy, chunk_size, chunk_overlap, semantic_threshold, api_key, provider, ollama_embedding_model, ollama_base_url)`** → `tuple[list[str], list[dict]]` — supports:
 - `CHUNK_STRATEGY_CHAR`: `CharacterTextSplitter(separator="\n", ...)`
-- `CHUNK_STRATEGY_SEMANTIC`: `SemanticChunker` from `langchain-experimental`
+- `CHUNK_STRATEGY_SEMANTIC`: `SemanticChunker` from `langchain-experimental`; uses `_get_embeddings()` which supports OpenAI, Claude (local `all-MiniLM-L6-v2`), and Ollama
 
-**`get_vectorstore(text_chunks, metadatas, api_key)`** → `FAISS`
+**`_get_embeddings(provider, api_key, ollama_embedding_model, ollama_base_url)`** → embedding object — factory that returns `OpenAIEmbeddings`, `HuggingFaceEmbeddings` (for Claude), or `OllamaEmbeddings` based on `provider`.
 
-**`load_vectorstore(index_path, api_key)`** → `FAISS | None` — loads from `index_path`; shows `st.warning()` on failure.
+**`get_vectorstore(text_chunks, metadatas, api_key, provider, ollama_embedding_model, ollama_base_url)`** → `FAISS`
 
-**`get_conversation_chain(vectorstore, model, stream_handler, api_key, temperature, retrieval_k, retrieval_mode, system_prompt, reranker_enabled, provider, ollama_base_url, doc_filter, hybrid_enabled, text_chunks, chunk_metadatas)`** → `Runnable`:
+**`load_vectorstore(index_path, api_key, provider, ollama_embedding_model, ollama_base_url)`** → `FAISS | None` — enforces path confinement via `_assert_within_base_dir()` and HMAC verification when `FAISS_HMAC_SECRET` is set; shows `st.error()` on failure.
+
+**`get_conversation_chain(vectorstore, model, stream_handler, api_key, temperature, retrieval_k, retrieval_mode, system_prompt, safe_rag_mode, reranker_enabled, provider, ollama_base_url, doc_filter, hybrid_enabled, text_chunks, chunk_metadatas)`** → `Runnable`:
 - LCEL pipeline: `create_history_aware_retriever` (question condensing) → `create_stuff_documents_chain` (QA) → `create_retrieval_chain`
 - Separate non-streaming `condense_llm` and streaming `answer_llm`
 - `ChatPromptTemplate` with `MessagesPlaceholder` for history; optional system prompt prefix
+- `safe_rag_mode=True` (default) prepends `SAFE_RAG_INSTRUCTIONS` to the QA system message and adds an injection-guard note to the condense prompt
 - Retriever build order: base retriever (Hybrid or FAISS) → optional `FilteredRetriever` → optional `RerankingRetriever`
 - `hybrid_enabled=True` builds a `HybridRetriever`; otherwise builds a plain FAISS retriever
 - `doc_filter` (non-empty list) wraps the base retriever with `FilteredRetriever`
@@ -156,9 +175,10 @@ The entire application. All functions have full type annotations (Python 3.11 na
 |---|---|---|
 | `test_chunking.py` | 9 | `get_text_chunks()`: parallel list lengths, metadata keys, multi-file/page attribution, chunk size bounds, relative chunk count, empty input, `ValueError` on `chunk_overlap > chunk_size` |
 | `test_pdf.py` | 5 | `get_pdf_text()`: single/multiple PDFs, no-text excluded, broken PDF warning, mixed good/broken |
-| `test_metadata.py` | 5 | `save_index_metadata()` / `load_index_metadata()`: roundtrip, missing file → None, corrupt JSON → None, overwrite, UTC ISO timestamp |
+| `test_metadata.py` | 20 | `save_index_metadata()` / `load_index_metadata()`: roundtrip, missing → None, corrupt → None, overwrite, UTC ISO timestamp; `_get_hmac_secret()`, `_compute_index_hmac()`: secret env var, hex digest, determinism, content sensitivity; `save_index_metadata()` HMAC inclusion; `_assert_within_base_dir()`: valid subdir, `../` traversal, symlink traversal |
 | `test_sessions.py` | 18 | `_serialize/deserialize_messages()`, `_serialize/deserialize_sources()`, `save/load/list/delete_session()`, `_safe_name()`, `_truncate_history()` |
 | `test_retrievers.py` | 15 | `FilteredRetriever` (5), `RerankingRetriever` (5), `HybridRetriever` (5): filtering logic, reranking order, RRF fusion, fallback behavior |
+| `test_safe_rag.py` | 13 | `SAFE_RAG_INSTRUCTIONS` content (6: non-empty, context-only rule, injection resistance, no-secret, no-reveal, no-persona-switch); `get_conversation_chain()` prompt templates (7): Safe RAG on/off injection into QA and condense prompts, user system prompt coexistence, ordering, default=True |
 
 ---
 
@@ -193,6 +213,7 @@ The entire application. All functions have full type annotations (Python 3.11 na
 | `ollama_model` | `str` | Ollama chat model name |
 | `ollama_embedding_model` | `str` | Ollama embedding model name |
 | `ollama_base_url` | `str` | Ollama server base URL |
+| `safe_rag_mode` | `bool` | Prompt-injection resistance toggle (default `True`); passed to `get_conversation_chain()` |
 
 ---
 
@@ -240,7 +261,7 @@ make run   # or: streamlit run app.py
 | `make install` | Install all dependencies from `requirements.txt` |
 | `make lint` | Run ruff linter |
 | `make format` | Run ruff formatter |
-| `make test` | Run pytest (52 unit tests) |
+| `make test` | Run pytest (80 unit tests) |
 | `make docker-build` | Build Docker image |
 | `make docker-up` | Build and start via Docker Compose (detached) |
 | `make docker-down` | Stop Docker Compose services |
@@ -323,6 +344,8 @@ make format   # auto-fix formatting
 
 12. **Parallel PDF extraction does not guarantee page order across files** — `ThreadPoolExecutor` processes files concurrently; results are re-assembled in original file order before chunking.
 
+13. **Safe RAG mode adds a fixed system message prefix** — `SAFE_RAG_INSTRUCTIONS` is a module-level constant; changing it requires restarting the server. Users can disable the feature per-session via the sidebar toggle but cannot edit the rules through the UI.
+
 ---
 
 ## What AI Assistants Should Know
@@ -341,3 +364,6 @@ make format   # auto-fix formatting
 - **Do not pin dependencies to exact versions.** Use `>=x.y.z` style.
 - **`save_index_metadata` and `load_index_metadata` require `index_path`** — they no longer use a global constant. Pass the result of `slot_path(slot_name)`.
 - **API keys are required.** The app will fail immediately without a valid `OPENAI_API_KEY` (for OpenAI) or `ANTHROPIC_API_KEY` (for Claude) set in `.env` or the sidebar. Ollama requires no API key.
+- **`safe_rag_mode` defaults to `True`** — always pass `st.session_state.safe_rag_mode` to `get_conversation_chain()`. Omitting it is safe (defaults to ON) but defeats the intent of the user-facing toggle.
+- **HMAC helpers are pure functions** — `_get_hmac_secret()`, `_compute_index_hmac()`, and `_assert_within_base_dir()` have no Streamlit side-effects. They can be called from tests without mocking `st`.
+- **`load_vectorstore` now raises instead of warning for HMAC failures** — when `FAISS_HMAC_SECRET` is set and the signature is missing or mismatched, the function shows `st.error()` and returns `None`; it does NOT load the index.
