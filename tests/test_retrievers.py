@@ -101,9 +101,7 @@ class TestRerankingRetriever:
         mock_encoder.predict.return_value = [0.1, 0.9]  # "better" gets higher score
 
         with patch("app._load_cross_encoder", return_value=mock_encoder):
-            retriever = RerankingRetriever(
-                base_retriever=_mock_base(docs), top_k=2, fetch_k=10
-            )
+            retriever = RerankingRetriever(base_retriever=_mock_base(docs), top_k=2, fetch_k=10)
             result = retriever._get_relevant_documents("test", run_manager=_RUN_MANAGER)
 
         assert result[0].page_content == "better"
@@ -115,9 +113,7 @@ class TestRerankingRetriever:
         mock_encoder.predict.return_value = [0.5, 0.4, 0.3, 0.2, 0.1]
 
         with patch("app._load_cross_encoder", return_value=mock_encoder):
-            retriever = RerankingRetriever(
-                base_retriever=_mock_base(docs), top_k=2, fetch_k=10
-            )
+            retriever = RerankingRetriever(base_retriever=_mock_base(docs), top_k=2, fetch_k=10)
             result = retriever._get_relevant_documents("test", run_manager=_RUN_MANAGER)
 
         assert len(result) == 2
@@ -125,9 +121,7 @@ class TestRerankingRetriever:
     def test_falls_back_to_original_order_on_encoder_error(self):
         docs = [Document(page_content=f"doc{i}", metadata={}) for i in range(3)]
         with patch("app._load_cross_encoder", side_effect=RuntimeError("model load failed")):
-            retriever = RerankingRetriever(
-                base_retriever=_mock_base(docs), top_k=2, fetch_k=10
-            )
+            retriever = RerankingRetriever(base_retriever=_mock_base(docs), top_k=2, fetch_k=10)
             result = retriever._get_relevant_documents("query", run_manager=_RUN_MANAGER)
 
         # Falls back: first 2 in original order
@@ -140,9 +134,7 @@ class TestRerankingRetriever:
         mock_encoder = MagicMock()
 
         with patch("app._load_cross_encoder", return_value=mock_encoder):
-            retriever = RerankingRetriever(
-                base_retriever=_mock_base(docs), top_k=5, fetch_k=10
-            )
+            retriever = RerankingRetriever(base_retriever=_mock_base(docs), top_k=5, fetch_k=10)
             result = retriever._get_relevant_documents("query", run_manager=_RUN_MANAGER)
 
         mock_encoder.predict.assert_not_called()
@@ -150,9 +142,7 @@ class TestRerankingRetriever:
 
     def test_empty_candidates(self):
         with patch("app._load_cross_encoder", return_value=MagicMock()):
-            retriever = RerankingRetriever(
-                base_retriever=_mock_base([]), top_k=5, fetch_k=10
-            )
+            retriever = RerankingRetriever(base_retriever=_mock_base([]), top_k=5, fetch_k=10)
             result = retriever._get_relevant_documents("query", run_manager=_RUN_MANAGER)
         assert result == []
 
