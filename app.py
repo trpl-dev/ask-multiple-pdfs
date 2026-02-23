@@ -1737,10 +1737,15 @@ def main() -> None:
                         ":warning: Semantic chunking calls the OpenAI Embeddings API "
                         "for every document during processing."
                     )
+                elif st.session_state.provider == PROVIDER_CLAUDE:
+                    st.caption(
+                        ":warning: Semantic chunking uses local `all-MiniLM-L6-v2` embeddings "
+                        "for every document during processing (no additional embedding API key needed)."
+                    )
                 else:
                     st.caption(
                         ":warning: Semantic chunking calls the Ollama Embeddings API "
-                        "for every document during processing."
+                        "on your local Ollama server for every document during processing."
                     )
 
         pdf_docs = st.file_uploader(
