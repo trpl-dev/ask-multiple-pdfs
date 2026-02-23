@@ -1290,6 +1290,8 @@ def main() -> None:
     if st.session_state.vectorstore is None and not st.session_state.chat_history:
         if st.session_state.provider == PROVIDER_OLLAMA:
             step1 = "Make sure your Ollama server is running (`ollama serve`)."
+        elif st.session_state.provider == PROVIDER_CLAUDE:
+            step1 = "Enter your Anthropic API key in the sidebar."
         else:
             step1 = "Enter your OpenAI API key in the sidebar."
         st.info(
