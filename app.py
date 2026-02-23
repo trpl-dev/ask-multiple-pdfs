@@ -443,6 +443,19 @@ def get_pdf_text(pdf_docs: list[Any]) -> list[tuple[str, str, int]]:
     return results
 
 
+def _build_ordered_texts_with_meta(
+    extracted_by_idx: dict[int, list[tuple[str, str, int]]],
+) -> list[tuple[str, str, int]]:
+    """Return extracted pages in deterministic order after parallel extraction.
+
+    Files are ordered by upload index, then pages are ordered by page number.
+    """
+    ordered: list[tuple[str, str, int]] = []
+    for idx in sorted(extracted_by_idx):
+        ordered.extend(sorted(extracted_by_idx[idx], key=lambda page: page[2]))
+    return ordered
+
+
 def get_text_chunks(
     texts_with_meta: list[tuple[str, str, int]],
     strategy: str = CHUNK_STRATEGY_CHAR,
@@ -1762,7 +1775,7 @@ def main() -> None:
                         # Step 1 — text extraction (parallelised per-file)
                         st.write(f"Extracting text from {len(pdf_docs)} PDF(s)…")
                         prog = st.progress(0.0)
-                        texts_with_meta = []
+                        extracted_by_idx: dict[int, list[tuple[str, str, int]]] = {}
                         with concurrent.futures.ThreadPoolExecutor() as pool:
                             future_to_pdf = {
                                 pool.submit(_extract_single_pdf, pdf): (idx, pdf)
@@ -1781,9 +1794,13 @@ def main() -> None:
                                     pages = []
                                 for w in warns:
                                     st.warning(w)
-                                texts_with_meta.extend(pages)
+                                extracted_by_idx[idx] = pages
                                 completed += 1
                                 prog.progress(completed / len(pdf_docs) * 0.35)
+
+                        # Keep extraction reproducible: thread completion order can vary,
+                        # so we re-sort by upload order and page number.
+                        texts_with_meta = _build_ordered_texts_with_meta(extracted_by_idx)
 
                         if not texts_with_meta:
                             proc_status.update(label="Extraction failed", state="error")
