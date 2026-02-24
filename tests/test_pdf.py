@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from app import get_pdf_text
+from app import _build_ordered_texts_with_meta, get_pdf_text
 
 
 def _make_mock_upload(name, page_texts):
@@ -99,3 +99,21 @@ def test_mixed_good_and_broken_pdfs():
     assert len(result) == 1
     assert result[0][1] == "good.pdf"
     mock_st.warning.assert_called_once()
+
+
+def test_build_ordered_texts_with_meta_is_deterministic():
+    extracted_by_idx = {
+        2: [("two-page-2", "two.pdf", 2), ("two-page-1", "two.pdf", 1)],
+        0: [("zero-page-2", "zero.pdf", 2), ("zero-page-1", "zero.pdf", 1)],
+        1: [("one-page-1", "one.pdf", 1)],
+    }
+
+    ordered = _build_ordered_texts_with_meta(extracted_by_idx)
+
+    assert ordered == [
+        ("zero-page-1", "zero.pdf", 1),
+        ("zero-page-2", "zero.pdf", 2),
+        ("one-page-1", "one.pdf", 1),
+        ("two-page-1", "two.pdf", 1),
+        ("two-page-2", "two.pdf", 2),
+    ]
