@@ -91,19 +91,19 @@ make run   # or: streamlit run app.py
 ### Using OpenAI
 
 1. Select **OpenAI** in the provider radio at the top of the sidebar (default).
-2. Enter your OpenAI API key in the sidebar (or set `OPENAI_API_KEY` in `.env`).
+2. Enter your **OpenAI API key** in the sidebar (or set `OPENAI_API_KEY` in `.env`).
 3. Upload one or more PDF files under **Your documents** and click **Process**.
 4. Ask questions in the chat input.
 
 ### Using Claude (Anthropic)
 
 1. Select **Claude (Anthropic)** in the provider radio at the top of the sidebar.
-2. Enter your Anthropic API key in the sidebar (or set `ANTHROPIC_API_KEY` in `.env`).
+2. Enter your **Anthropic API key** in the sidebar (or set `ANTHROPIC_API_KEY` in `.env`).
 3. Choose a model from the dropdown (`claude-opus-4-6`, `claude-sonnet-4-6`, or `claude-haiku-4-6`).
 4. Upload one or more PDF files under **Your documents** and click **Process**.
 5. Ask questions in the chat input.
 
-> **Embeddings:** The Claude provider uses a local `all-MiniLM-L6-v2` model for embeddings (via `sentence-transformers`), so no second API key is required.
+> **Embeddings:** The Claude provider uses a local `all-MiniLM-L6-v2` model for embeddings (via `sentence-transformers`) for both standard chunking and Semantic Chunking, so no second API key is required.
 
 ### Using Ollama (local)
 
@@ -114,8 +114,10 @@ make run   # or: streamlit run app.py
    ollama pull nomic-embed-text
    ```
 3. Select **Ollama (local)** in the provider radio at the top of the sidebar.
-4. Set the base URL (default: `http://localhost:11434`), chat model, and embedding model.
+4. Set the **Ollama base URL** (default: `http://localhost:11434`), chat model, and embedding model.
 5. Upload PDFs and click **Process**.
+
+> **Server requirement:** Ollama must be running locally (`ollama serve`) for both chat and embedding model requests.
 
 > **Note:** The embedding model used when building the index must match the one used when loading it. If you change the embedding model, re-process your documents.
 
@@ -153,13 +155,15 @@ Use the **Reset cost tracker** button to start a fresh count without clearing th
 | **Provider** | Switch between OpenAI, Claude (Anthropic), and Ollama (local); clears the index and history |
 | **OpenAI settings** | API key input, model selector (`gpt-4o-mini`, `gpt-3.5-turbo`, `gpt-4o`) |
 | **Claude settings** | Anthropic API key input, model selector (`claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-6`) |
-| **Ollama settings** | Base URL, chat model name, embedding model name |
+| **Ollama settings** | Ollama base URL, chat model name, embedding model name |
 | **Cost tracker** | Session token counts and estimated USD cost (OpenAI and Claude); reset button |
 | **LLM & Retrieval** | System prompt, Temperature, Retrieved chunks (k), Retrieval mode, Cross-encoder re-ranking, **Hybrid search**, **Filter by document**, **Safe RAG mode** |
 | **Sessions** | Save/load named chat sessions; search by name; bulk-delete via multiselect (delete requires confirmation) |
 | **Index slots** | Create and switch between independent FAISS indexes |
 | **Chunking settings** | Character splitter (size, overlap) or Semantic splitter (percentile threshold) |
 | **Your documents** | Index status indicator, PDF uploader, Process button, Clear saved index |
+
+Provider hints in the sidebar are provider-specific and will reference the relevant requirement (OpenAI API key, Anthropic API key, or Ollama base URL/local embeddings).
 
 ### Safe RAG Mode (Prompt-Injection Resistance)
 
